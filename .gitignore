@@ -8,3 +8,4 @@ runs/
 apks/*.apk
 .claude/worktrees/
 .DS_Store
+apps-probe/apks/
