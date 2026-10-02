@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Harness Console</title>
+    <style>
+      :root {
+        --bg: #f6f6f4;
+        --fg: #1b1b1b;
+        --muted: #676767;
+        --card: #fff;
+        --line: #dcdcd8;
+        --accent: #2f5bd3;
+        --accent-fg: #fff;
+        --pass: #1a7f37;
+        --fail: #c62828;
+        --warn: #9a6200;
+        --code: #efefec;
+        --warn-bg: #fff4dc;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121212;
+          --fg: #e8e8e6;
+          --muted: #9b9b98;
+          --card: #1c1c1c;
+          --line: #333;
+          --accent: #7f9cf5;
+          --accent-fg: #0e0e0e;
+          --pass: #4cc26a;
+          --fail: #ef6b6b;
+          --warn: #e2b04a;
+          --code: #262626;
+          --warn-bg: #2d2416;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.45 system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 16px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--card);
+      }
+      header h1 {
+        font-size: 1.05rem;
+        margin: 0;
+      }
+      nav {
+        display: flex;
+        gap: 4px;
+      }
+      nav button {
+        background: none;
+        color: var(--fg);
+        border: 1px solid transparent;
+      }
+      nav button[aria-selected="true"] {
+        border-color: var(--line);
+        background: var(--bg);
+        font-weight: 600;
+      }
+      main {
+        padding: 16px;
+      }
+      .tab[hidden] {
+        display: none;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 300px minmax(0, 1fr) 320px;
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 1100px) {
+        .grid {
+          grid-template-columns: 280px minmax(0, 1fr);
+        }
+        .grid > .side {
+          grid-column: 1 / -1;
+        }
+      }
+      @media (max-width: 720px) {
+        .grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      section {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        margin: 0 0 12px;
+        min-width: 0;
+      }
+      h2 {
+        font-size: 0.95rem;
+        margin: 0 0 8px;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin: 10px 0 4px;
+      }
+      select,
+      textarea,
+      input[type="number"] {
+        width: 100%;
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 8px;
+      }
+      textarea {
+        min-height: 80px;
+        resize: vertical;
+      }
+      textarea:disabled {
+        opacity: 0.55;
+      }
+      button {
+        font: inherit;
+        border-radius: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--fg);
+      }
+      button.primary {
+        background: var(--accent);
+        color: var(--accent-fg);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .small {
+        font-size: 0.82rem;
+      }
+      .note {
+        background: var(--warn-bg);
+        color: var(--fg);
+        border-left: 3px solid var(--warn);
+        padding: 6px 8px;
+        border-radius: 4px;
+        font-size: 0.82rem;
+        margin: 6px 0 0;
+      }
+      .preview {
+        background: var(--code);
+        padding: 8px;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        overflow-wrap: anywhere;
+      }
+      pre {
+        background: var(--code);
+        padding: 8px;
+        border-radius: 6px;
+        margin: 4px 0 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 12.5px;
+        max-height: 240px;
+        overflow: auto;
+      }
+      #shot {
+        display: block;
+        max-width: 100%;
+        max-height: 70vh;
+        margin: 0 auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .shotbox {
+        text-align: center;
+        min-height: 120px;
+      }
+      ol#steps {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      ol#steps li {
+        border-top: 1px solid var(--line);
+        padding: 8px 0;
+      }
+      ol#steps li:first-child {
+        border-top: none;
+      }
+      .tool {
+        font-family: ui-monospace, Menlo, monospace;
+        font-weight: 600;
+      }
+      .pass {
+        color: var(--pass);
+        font-weight: 600;
+      }
+      .fail {
+        color: var(--fail);
+        font-weight: 600;
+      }
+      .warn {
+        color: var(--warn);
+        font-weight: 600;
+      }
+      #confirm {
+        border: 2px solid var(--warn);
+      }
+      #confirm[hidden] {
+        display: none;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.85rem;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Harness Console</h1>
+      <nav role="tablist">
+        <button role="tab" data-tab="run" aria-selected="true">Run</button>
+        <button role="tab" data-tab="runs" aria-selected="false">Runs</button>
+        <button role="tab" data-tab="score" aria-selected="false">
+          Scoreboard
+        </button>
+      </nav>
+      <span class="muted small" id="model"></span>
+    </header>
+    <main>
+      <div class="tab grid" id="tab-run">
+        <div>
+          <section>
+            <h2>Start a run</h2>
+            <label for="task">Task</label>
+            <select id="task"></select>
+            <div class="preview" id="goal-preview"></div>
+            <label for="goal">Or a freeform goal</label>
+            <textarea
+              id="goal"
+              placeholder="e.g. Open Markor and make a shopping list"
+            ></textarea>
+            <p class="note" id="freeform-note" hidden></p>
+            <label for="policy">Confirmation</label>
+            <select id="policy">
+              <option value="ui">Ask me here (ui)</option>
+              <option value="approve">Always approve</option>
+              <option value="reject">Always reject</option>
+            </select>
+            <label for="repeat">Repeat</label>
+            <input type="number" id="repeat" min="1" max="20" value="1" />
+            <label class="row"
+              ><input type="checkbox" id="fake" /> Fake (no emulator, no API
+              spend)</label
+            >
+            <p class="note small" id="fake-note" hidden></p>
+            <div class="row" style="margin-top: 12px">
+              <button class="primary" id="start">Start</button>
+              <span class="small muted" id="start-msg"></span>
+            </div>
+          </section>
+        </div>
+        <div>
+          <section>
+            <div class="row" style="justify-content: space-between">
+              <h2 id="run-title">No run yet</h2>
+              <span class="small muted" id="run-meta"></span>
+            </div>
+            <div class="shotbox">
+              <img id="shot" alt="Latest screenshot" hidden />
+              <p class="muted small" id="shot-empty">
+                Screenshots appear here, one per step.
+              </p>
+            </div>
+          </section>
+          <section>
+            <h2>Steps</h2>
+            <ol id="steps"></ol>
+          </section>
+        </div>
+        <div class="side">
+          <section id="confirm" hidden>
+            <h2>Confirmation needed</h2>
+            <p>
+              The run asks to: <span class="tool" id="confirm-action"></span>
+            </p>
+            <pre id="confirm-summary"></pre>
+            <p class="note" id="confirm-fake" hidden></p>
+            <div class="row" style="margin-top: 10px">
+              <button class="primary" id="approve">Approve</button>
+              <button id="reject">Reject</button>
+            </div>
+            <p class="small muted">
+              Unanswered requests are rejected after
+              <span id="confirm-timeout"></span> s.
+            </p>
+          </section>
+          <section>
+            <h2>Job</h2>
+            <div id="job" class="small muted">Idle.</div>
+          </section>
+        </div>
+      </div>
+
+      <div class="tab" id="tab-runs" hidden>
+        <section>
+          <div class="row" style="justify-content: space-between">
+            <h2>Runs</h2>
+            <button id="reload-runs">Refresh</button>
+          </div>
+          <div class="scroll"><table id="runs-table"></table></div>
+        </section>
+      </div>
+
+      <div class="tab" id="tab-score" hidden>
+        <section>
+          <div class="row" style="justify-content: space-between">
+            <h2>Scoreboard</h2>
+            <button id="reload-score">Refresh</button>
+          </div>
+          <p class="small muted" id="ledger"></p>
+          <div id="score"></div>
+        </section>
+      </div>
+    </main>
+    <script>
+      "use strict";
+      // Drop the token from the address bar; the server has set a cookie.
+      if (location.search.includes("token="))
+        history.replaceState(null, "", location.pathname);
+
+      const $ = (id) => document.getElementById(id);
+      function el(tag, attrs, ...kids) {
+        const e = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+          if (k === "class") e.className = v;
+          else if (k === "text") e.textContent = v;
+          else e.setAttribute(k, v);
+        }
+        for (const k of kids) if (k != null) e.append(k);
+        return e;
+      }
+      async function api(path, opts) {
+        const r = await fetch(
+          path,
+          Object.assign(
+            { credentials: "same-origin", cache: "no-store" },
+            opts || {},
+          ),
+        );
+        if (r.status === 204) return null;
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok)
+          throw new Error(
+            typeof body.detail === "string"
+              ? body.detail
+              : JSON.stringify(body.detail || r.status),
+          );
+        return body;
+      }
+      const fmtUsd = (v) => (v == null ? "n/a" : "$" + Number(v).toFixed(4));
+      const fmtRate = (r) =>
+        r.rate == null
+          ? "– (n=0)"
+          : (100 * r.rate).toFixed(0) + "% (n=" + r.n + ")";
+      const fmtMean = (m, d, unit) =>
+        m.mean == null
+          ? "–"
+          : Number(m.mean).toFixed(d) + (unit || "") + " (n=" + m.n + ")";
+
+      let cfg = {},
+        tasks = [],
+        current = null,
+        source = null;
+
+      // --- tabs
+      document.querySelectorAll("nav button").forEach((b) =>
+        b.addEventListener("click", () => {
+          document
+            .querySelectorAll("nav button")
+            .forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+          document.querySelectorAll(".tab").forEach((t) => {
+            t.hidden = t.id !== "tab-" + b.dataset.tab;
+          });
+          if (b.dataset.tab === "runs") loadRuns();
+          if (b.dataset.tab === "score") loadScore();
+        }),
+      );
+
+      // --- form
+      function updatePreview() {
+        const t = tasks.find((x) => x.id === $("task").value);
+        $("goal-preview").textContent = t
+          ? "flow " + t.flow_type + " · " + t.goal_template
+          : "";
+        const flowF = t && t.flow_type === "f";
+        const freeform = $("goal").value.trim() !== "";
+        $("fake-note").hidden = !($("fake").checked && (flowF || freeform));
+        $("fake-note").textContent =
+          "Fake runs of flow-F tasks and freeform goals include one confirmation request " +
+          "inserted by the server (" +
+          (cfg.fake_confirm_note || "") +
+          "), so you can try the gate. It is not the agent's choice.";
+      }
+      $("task").addEventListener("change", updatePreview);
+      $("goal").addEventListener("input", () => {
+        $("task").disabled = $("goal").value.trim() !== "";
+        updatePreview();
+      });
+      $("fake").addEventListener("change", updatePreview);
+
+      $("start").addEventListener("click", async () => {
+        const goal = $("goal").value.trim();
+        const body = {
+          policy: $("policy").value,
+          fake: $("fake").checked,
+          repeat: Number($("repeat").value) || 1,
+        };
+        if (goal) body.goal = goal;
+        else body.task_id = $("task").value;
+        $("start-msg").textContent = "";
+        try {
+          const job = await api("/api/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          watch(job);
+        } catch (e) {
+          $("start-msg").textContent = e.message;
+        }
+      });
+
+      // --- live job
+      function showJob(j) {
+        const box = $("job");
+        box.replaceChildren();
+        box.append(
+          el("div", { text: j.job_id + " · " + j.status }),
+          el("div", {
+            text:
+              (j.task_id || "freeform") +
+              " · policy " +
+              j.policy +
+              (j.fake ? " · fake" : "") +
+              " · ×" +
+              j.repeat,
+          }),
+        );
+        if (j.run_ids.length) {
+          const ul = el("ul", { class: "small" });
+          j.run_ids.forEach((id) =>
+            ul.append(
+              el(
+                "li",
+                {},
+                el("a", {
+                  href: "/runs/" + id + "/replay.html",
+                  target: "_blank",
+                  rel: "noopener",
+                  text: id,
+                }),
+              ),
+            ),
+          );
+          box.append(ul);
+        }
+        if (j.error) box.append(el("div", { class: "fail", text: j.error }));
+      }
+      function watch(job) {
+        if (source) source.close();
+        current = job;
+        showJob(job);
+        $("steps").replaceChildren();
+        $("shot").hidden = true;
+        $("shot-empty").hidden = false;
+        $("run-title").textContent = "Queued…";
+        $("run-meta").textContent = "";
+        source = new EventSource("/api/jobs/" + job.job_id + "/events");
+        source.addEventListener("run_started", (e) => {
+          const d = JSON.parse(e.data);
+          current.run_ids = current.run_ids.includes(d.run_id)
+            ? current.run_ids
+            : current.run_ids.concat(d.run_id);
+          current.status = "running";
+          showJob(current);
+          $("run-title").textContent =
+            (d.task_id || "freeform") + " · " + d.run_id;
+          $("steps").replaceChildren(
+            el("li", { class: "muted small", text: "Goal: " + d.goal }),
+          );
+        });
+        source.addEventListener("step", (e) => {
+          const d = JSON.parse(e.data);
+          if (d.screenshot_png_b64) {
+            $("shot").src = "data:image/png;base64," + d.screenshot_png_b64;
+            $("shot").hidden = false;
+            $("shot-empty").hidden = true;
+          }
+          const u = d.usage_so_far;
+          $("run-meta").textContent =
+            "step " +
+            d.index +
+            " · " +
+            (u.input_tokens + u.output_tokens) +
+            " tokens · " +
+            fmtUsd(d.cost_so_far_usd);
+          const li = el(
+            "li",
+            {},
+            el(
+              "div",
+              {},
+              el("span", { class: "muted", text: "#" + d.index + " " }),
+              el("span", { class: "tool", text: d.tool_name }),
+            ),
+          );
+          if (d.reasoning)
+            li.append(el("div", { class: "small", text: d.reasoning }));
+          const det = el(
+            "details",
+            {},
+            el("summary", { class: "small muted", text: "input / result" }),
+            el("pre", {
+              text: JSON.stringify(
+                { input: d.tool_input, result: d.tool_result },
+                null,
+                2,
+              ),
+            }),
+          );
+          li.append(det);
+          $("steps").append(li);
+        });
+        source.addEventListener("confirmation", (e) => {
+          const d = JSON.parse(e.data);
+          $("confirm-action").textContent = d.action;
+          $("confirm-summary").textContent = JSON.stringify(d.summary, null, 2);
+          const fakeNote =
+            d.summary && d.summary.note === cfg.fake_confirm_note;
+          $("confirm-fake").hidden = !fakeNote;
+          $("confirm-fake").textContent =
+            "This request was inserted by the server for a fake run; it is not the agent's own behaviour.";
+          $("confirm").hidden = false;
+          current.status = "waiting_confirmation";
+          showJob(current);
+        });
+        source.addEventListener("confirmation_resolved", (e) => {
+          const d = JSON.parse(e.data);
+          $("confirm").hidden = true;
+          current.status = "running";
+          showJob(current);
+          $("steps").append(
+            el("li", {
+              class: d.decision === "approve" ? "pass small" : "fail small",
+              text:
+                "Confirmation " +
+                d.action +
+                ": " +
+                d.decision +
+                (d.by === "timeout" ? " (timed out)" : ""),
+            }),
+          );
+        });
+        source.addEventListener("run_finished", (e) => {
+          const d = JSON.parse(e.data);
+          const v =
+            d.verifier_passed == null
+              ? "unverified"
+              : d.verifier_passed
+                ? "verifier PASS"
+                : "verifier FAIL";
+          $("steps").append(
+            el("li", {
+              class: d.verifier_passed
+                ? "pass"
+                : d.verifier_passed === false
+                  ? "fail"
+                  : "warn",
+              text:
+                "Finished: agent " +
+                (d.agent_verdict || "none") +
+                " · " +
+                v +
+                " · " +
+                (d.termination_reason || "") +
+                (d.error ? " · " + d.error : ""),
+            }),
+          );
+        });
+        source.addEventListener("job_done", (e) => {
+          current = JSON.parse(e.data);
+          showJob(current);
+          $("confirm").hidden = true;
+          source.close();
+          source = null;
+        });
+        source.onerror = () => {
+          if (source && source.readyState === EventSource.CLOSED)
+            $("job").append(
+              el("div", { class: "fail", text: "Stream closed." }),
+            );
+        };
+      }
+      async function answer(decision) {
+        if (!current) return;
+        try {
+          await api("/api/jobs/" + current.job_id + "/confirmation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision }),
+          });
+        } catch (e) {
+          $("job").append(el("div", { class: "fail", text: e.message }));
+        }
+      }
+      $("approve").addEventListener("click", () => answer("approve"));
+      $("reject").addEventListener("click", () => answer("reject"));
+
+      // --- runs
+      async function loadRuns() {
+        const runs = await api("/api/runs");
+        const t = $("runs-table");
+        t.replaceChildren();
+        t.append(
+          el(
+            "tr",
+            {},
+            ...[
+              "run",
+              "task",
+              "agent",
+              "verifier",
+              "end",
+              "steps",
+              "wall",
+              "cost",
+              "",
+            ].map((h) => el("th", { text: h })),
+          ),
+        );
+        if (!runs.length)
+          t.append(
+            el(
+              "tr",
+              {},
+              el("td", { colspan: "9", class: "muted", text: "No runs yet." }),
+            ),
+          );
+        for (const r of runs) {
+          const v =
+            r.verifier_passed == null
+              ? el("span", { class: "muted", text: "unverified" })
+              : el("span", {
+                  class: r.verifier_passed ? "pass" : "fail",
+                  text: r.verifier_passed ? "PASS" : "FAIL",
+                });
+          t.append(
+            el(
+              "tr",
+              {},
+              el(
+                "td",
+                {},
+                r.has_replay
+                  ? el("a", {
+                      href: "/runs/" + r.run_id + "/replay.html",
+                      target: "_blank",
+                      rel: "noopener",
+                      text: r.run_id,
+                    })
+                  : r.run_id,
+              ),
+              el("td", {
+                text: (r.task_id || "freeform") + " (" + r.flow_type + ")",
+              }),
+              el("td", { text: r.agent_verdict || "none" }),
+              el("td", {}, v),
+              el("td", { text: r.termination_reason || "unfinished" }),
+              el("td", { text: r.steps == null ? "" : String(r.steps) }),
+              el("td", {
+                text: r.wall_s == null ? "" : r.wall_s.toFixed(1) + " s",
+              }),
+              el("td", { text: fmtUsd(r.cost_usd) }),
+              el("td", { class: "small", text: r.fake ? "fake" : "" }),
+            ),
+          );
+        }
+      }
+      $("reload-runs").addEventListener("click", loadRuns);
+
+      // --- scoreboard
+      function scoreTable(rows, keyLabel, key) {
+        const t = el("table");
+        t.append(
+          el(
+            "tr",
+            {},
+            ...[
+              keyLabel,
+              "runs",
+              "verifier pass",
+              "agent said done",
+              "false success",
+              "false failure",
+              "mean steps",
+              "mean cost",
+              "mean wall",
+            ].map((h) => el("th", { text: h })),
+          ),
+        );
+        for (const r of rows)
+          t.append(
+            el(
+              "tr",
+              {},
+              el("td", {
+                text:
+                  r[key] +
+                  (r.oracle_tier != null
+                    ? " (tier " + r.oracle_tier + ")"
+                    : ""),
+              }),
+              el("td", { text: String(r.runs) }),
+              el("td", { text: fmtRate(r.verifier_pass) }),
+              el("td", { text: fmtRate(r.agent_said_done) }),
+              el("td", {
+                text: r.false_success.count + " / " + r.false_success.n,
+              }),
+              el("td", {
+                text: r.false_failure.count + " / " + r.false_failure.n,
+              }),
+              el("td", { text: fmtMean(r.steps, 1) }),
+              el("td", {
+                text:
+                  r.cost_usd.mean == null
+                    ? "–"
+                    : fmtUsd(r.cost_usd.mean) + " (n=" + r.cost_usd.n + ")",
+              }),
+              el("td", { text: fmtMean(r.wall_s, 1, " s") }),
+            ),
+          );
+        return el("div", { class: "scroll" }, t);
+      }
+      async function loadScore() {
+        const s = await api("/api/scoreboard");
+        $("ledger").textContent =
+          "Ledger spend to date: " +
+          fmtUsd(s.ledger_total_usd) +
+          ". Rates show their denominator n; freeform runs have no verifier and are excluded from verifier rates.";
+        const box = $("score");
+        box.replaceChildren();
+        for (const [name, g] of [
+          ["Real runs", s.real],
+          ["Fake runs (pipeline checks, not agent results)", s.fake],
+        ]) {
+          box.append(
+            el("h2", { text: name + " · " + g.totals.runs + " runs" }),
+          );
+          if (!g.totals.runs) {
+            box.append(el("p", { class: "muted small", text: "None." }));
+            continue;
+          }
+          box.append(
+            el("h2", { class: "small muted", text: "By flow type" }),
+            scoreTable(
+              g.by_flow.concat([Object.assign({ flow_type: "all" }, g.totals)]),
+              "flow",
+              "flow_type",
+            ),
+          );
+          box.append(
+            el("h2", { class: "small muted", text: "By task" }),
+            scoreTable(g.by_task, "task", "task_id"),
+          );
+        }
+      }
+      $("reload-score").addEventListener("click", loadScore);
+
+      // --- boot
+      (async function boot() {
+        try {
+          [cfg, tasks] = await Promise.all([
+            api("/api/config"),
+            api("/api/tasks"),
+          ]);
+        } catch (e) {
+          $("job").textContent = "Could not load: " + e.message;
+          return;
+        }
+        $("model").textContent = "model " + cfg.model;
+        $("confirm-timeout").textContent = String(cfg.confirm_timeout_s);
+        $("fake").checked = !!cfg.fake_default;
+        for (const t of tasks)
+          $("task").append(
+            el("option", {
+              value: t.id,
+              text: t.id + " (flow " + t.flow_type + ")",
+            }),
+          );
+        if (!cfg.freeform_enabled) {
+          $("goal").disabled = true;
+          $("freeform-note").hidden = false;
+          $("freeform-note").textContent = cfg.freeform_note;
+        }
+        updatePreview();
+        const jobs = await api("/api/jobs").catch(() => []);
+        const live = jobs.find(
+          (j) => j.status !== "done" && j.status !== "error",
+        );
+        if (live) watch(live);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,104 @@
+{
+  "variant": "A",
+  "provider_mode": "full",
+  "shipping_cents": 369,
+  "interruptions": {
+    "notification_prompt": false,
+    "promo_dialog": false
+  },
+  "products": [
+    {
+      "id": 1,
+      "name": "Cupcake",
+      "tagline": "Vanilla, iced",
+      "price_cents": 299,
+      "image": "cupcake",
+      "collection": "Bakery"
+    },
+    {
+      "id": 2,
+      "name": "Donut",
+      "tagline": "Glazed ring",
+      "price_cents": 249,
+      "image": "donut",
+      "collection": "Bakery"
+    },
+    {
+      "id": 3,
+      "name": "Eclair",
+      "tagline": "Chocolate top",
+      "price_cents": 399,
+      "image": "eclair",
+      "collection": "Bakery"
+    },
+    {
+      "id": 4,
+      "name": "Gingerbread",
+      "tagline": "Spiced",
+      "price_cents": 499,
+      "image": "gingerbread",
+      "collection": "Bakery"
+    },
+    {
+      "id": 5,
+      "name": "Pretzels",
+      "tagline": "Salted",
+      "price_cents": 349,
+      "image": "pretzels",
+      "collection": "Savoury"
+    },
+    {
+      "id": 6,
+      "name": "Popcorn",
+      "tagline": "Butter",
+      "price_cents": 299,
+      "image": "popcorn",
+      "collection": "Savoury"
+    },
+    {
+      "id": 7,
+      "name": "Almonds",
+      "tagline": "Roasted",
+      "price_cents": 599,
+      "image": "almonds",
+      "collection": "Savoury"
+    },
+    {
+      "id": 8,
+      "name": "Mango",
+      "tagline": "Dried slices",
+      "price_cents": 449,
+      "image": "mango",
+      "collection": "Fruit"
+    },
+    {
+      "id": 9,
+      "name": "Kiwi",
+      "tagline": "Fresh",
+      "price_cents": 199,
+      "image": "kiwi",
+      "collection": "Fruit"
+    }
+  ],
+  "cart": [
+    { "product_id": 4, "quantity": 2 },
+    { "product_id": 6, "quantity": 1 }
+  ],
+  "orders": [
+    {
+      "id": 1001,
+      "placed_at": 1758463500000,
+      "status": "DELIVERED",
+      "items": [
+        { "product_id": 1, "quantity": 3 },
+        { "product_id": 8, "quantity": 1 }
+      ]
+    },
+    {
+      "id": 1002,
+      "placed_at": 1759081200000,
+      "status": "SHIPPED",
+      "items": [{ "product_id": 7, "quantity": 2, "unit_price_cents": 549 }]
+    }
+  ]
+}

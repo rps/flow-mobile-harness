@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labs-harness"
+version = "0.1.0"
+description = "Goal-driven mobile agent harness prototype"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic",
+    "fastapi",
+    "uvicorn",
+    "pillow",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+include = ["harness*"]
+
+[tool.setuptools.package-data]
+harness = ["server/static/*", "agent/pricing.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
