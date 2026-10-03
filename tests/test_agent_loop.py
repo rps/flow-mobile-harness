@@ -441,7 +441,7 @@ def test_sensitive_action_rule_covers_each_category():
     expected = {
         "anything financial": ("invoice", "even as a draft"),
         "anything outbound": ("message",),
-        "anything destructive or hard to undo": ("deleting", "settings"),
+        "anything destructive or hard to undo": ("deleting", "settings", "permissions beyond what the goal needs"),
         "anything that commits another person or account.": (),
     }
     assert set(bullets) >= set(expected), bullets
@@ -451,6 +451,10 @@ def test_sensitive_action_rule_covers_each_category():
     exemption = next((s for s in prose.split(". ") if "not sensitive" in s), "")
     for phrase in ("Reading", "navigating", "private note"):
         assert phrase in exemption, phrase
+    grant = next((s for s in prose.split(". ") if "permission the goal requires" in s), "")
+    assert "not sensitive" in grant, grant
+    for phrase in ("storage", "files", "notifications"):
+        assert phrase in grant, phrase
     assert "Only take the step if the answer is approve" in prose
     assert "do not ask again for the same action" in prose
     assert "cannot easily be undone" not in prompts.SYSTEM_PROMPT

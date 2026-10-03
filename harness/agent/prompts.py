@@ -26,7 +26,8 @@ changing account or app settings, or granting permissions beyond what the \
 goal needs;
 - anything that commits another person or account.
 Reading, searching, opening apps, navigating and writing a private note are \
-not sensitive. Pass the action and a structured summary of exactly what is \
+not sensitive. Granting an app a permission the goal requires (storage, \
+files, notifications) is not sensitive either. Pass the action and a structured summary of exactly what is \
 prepared (recipient, items, quantities, amounts, text). Only take the step if \
 the answer is approve. If the answer is reject, do not ask again for the same \
 action: finish, or try a different approach that does not need it.
