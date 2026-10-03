@@ -4,6 +4,7 @@ import pytest
 
 from harness.contracts import FlowType, OracleTier
 from harness.seed.generator import generate_plan
+from harness.tasks import catalog
 from harness.tasks.registry import all_tasks, get, render_goal
 
 HINT_WORDS = ["verif", "check", "provider", "database", "/sdcard", "file", "adb", "seed",
@@ -50,3 +51,35 @@ def test_b_and_f_goals_do_not_reveal_the_values_to_find():
         plan = generate_plan(seed, get("f_send_sms"))
         goal = render_goal(get("f_send_sms"), plan)
         assert plan.expected["message"] in goal and plan.expected["phone"] not in goal
+
+
+def test_catalog_names_every_task_and_flow():
+    assert set(catalog.TASKS) == {t.id for t in all_tasks()}
+    assert set(catalog.FLOWS) == set(FlowType) - {FlowType.FREEFORM}
+    for name, description in catalog.TASKS.values():
+        assert name.strip() and description.strip()
+    for tag, name, description in catalog.FLOWS.values():
+        assert tag.strip() and name.strip() and description.strip()
+    labels = [catalog.task_label(t.id) for t in all_tasks()]
+    assert len(set(labels)) == len(labels)
+
+
+def test_task_label_uses_the_flow_tag_and_keeps_retired_ids():
+    assert catalog.task_label("c_variant_b") == "[Flow C] Checkout on an Alternate UI"
+    assert catalog.task_label("drift_provider_vs_ui") == "[Flow Drift] Detect Data Mismatch"
+    assert catalog.task_label("retired_task") == "retired_task"
+    assert catalog.flow_label(FlowType.DRIFT) == "[Flow Drift] Data Source Drift"
+    with pytest.raises(KeyError):
+        catalog.task_info("retired_task")
+
+
+def test_catalog_flows_group_tasks_under_their_own_flow():
+    flows = catalog.flows()
+    assert [f["tag"] for f in flows] == ["A", "B", "C", "D", "E", "F", "G", "H", "Drift"]
+    by_flow = {f["flow_type"]: f for f in flows}
+    assert by_flow["g"]["tasks"] == []  # fixture fact: no G task yet; an empty flow is still listed
+    assert [t["id"] for t in by_flow["c"]["tasks"]] == ["c_variant_b"]
+    for flow, f in by_flow.items():
+        assert all(get(t["id"]).flow_type.value == flow for t in f["tasks"])
+        assert [t["label"] for t in f["tasks"]] == sorted(t["label"] for t in f["tasks"])
+    assert sum(len(f["tasks"]) for f in by_flow.values()) == len(all_tasks())

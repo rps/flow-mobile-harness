@@ -19,6 +19,7 @@
         --warn: #9a6200;
         --code: #efefec;
         --warn-bg: #fff4dc;
+        --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23676767' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
       }
       /* Dark tokens apply with the system scheme unless the page is forced
          light, and always when it is forced dark (the Theme control). */
@@ -36,6 +37,7 @@
           --warn: #e2b04a;
           --code: #262626;
           --warn-bg: #2d2416;
+          --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239b9b98' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
         }
       }
       :root[data-theme="dark"] {
@@ -51,6 +53,7 @@
         --warn: #e2b04a;
         --code: #262626;
         --warn-bg: #2d2416;
+        --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239b9b98' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
       }
       * {
         box-sizing: border-box;
@@ -153,6 +156,15 @@
         border: 1px solid var(--line);
         border-radius: 6px;
         padding: 6px 8px;
+      }
+      select {
+        appearance: none;
+        -webkit-appearance: none;
+        padding-right: 32px;
+        background-image: var(--chevron);
+        background-repeat: no-repeat;
+        background-position: right 12px center;
+        background-size: 12px 8px;
       }
       textarea {
         min-height: 80px;
@@ -302,7 +314,8 @@
       }
       header .theme select {
         width: auto;
-        padding: 2px 6px;
+        padding: 2px 26px 2px 6px;
+        background-position: right 8px center;
         font-size: 0.82rem;
       }
       #run-detail[hidden] {
@@ -359,6 +372,7 @@
         <button role="tab" data-tab="score" aria-selected="false">
           Scoreboard
         </button>
+        <button role="tab" data-tab="flows" aria-selected="false">Flows</button>
       </nav>
       <span class="muted small" id="model"></span>
       <label class="theme small muted"
@@ -377,13 +391,30 @@
             <h2>Start a run</h2>
             <label for="task">Task</label>
             <select id="task"></select>
-            <div class="preview" id="goal-preview"></div>
-            <label for="goal">Or a freeform goal</label>
-            <textarea
-              id="goal"
-              placeholder="e.g. Open Markor and make a shopping list"
-            ></textarea>
-            <p class="note" id="freeform-note" hidden></p>
+            <div id="task-info">
+              <label id="task-desc-label">Description</label>
+              <div
+                class="preview"
+                id="task-desc"
+                aria-labelledby="task-desc-label"
+              ></div>
+              <label id="task-cmd-label">Command</label>
+              <div
+                class="preview"
+                id="task-cmd"
+                aria-labelledby="task-cmd-label"
+              ></div>
+              <p class="small muted" style="margin: 4px 0 0">
+                Values in {braces} are filled in from each run's seed.
+              </p>
+            </div>
+            <div id="freeform-box" hidden>
+              <label for="goal">Freeform goal</label>
+              <textarea
+                id="goal"
+                placeholder="e.g. Open Markor and make a shopping list"
+              ></textarea>
+            </div>
             <label for="policy">Confirmation</label>
             <select id="policy">
               <option value="ui">Ask me here (ui)</option>
@@ -465,6 +496,10 @@
         </section>
       </div>
 
+      <div class="tab" id="tab-flows" hidden>
+        <div id="flows"></div>
+      </div>
+
       <div class="tab" id="tab-score" hidden>
         <section>
           <div class="row" style="justify-content: space-between">
@@ -541,12 +576,25 @@
       });
 
       const TERMINAL = ["done", "error", "cancelled"];
+      const FREEFORM = "__freeform__";
       let cfg = {},
         tasks = [],
+        flows = [],
         current = null,
         source = null;
+      // "[Flow X] Name" for a registered task; a retired id stays as it is
+      function taskLabel(id, flow) {
+        if (!id || id === "freeform") return "Freeform Goal";
+        const t = tasks.find((x) => x.id === id);
+        return t ? t.label : id + (flow ? " (flow " + flow + ")" : "");
+      }
+      function flowLabel(flow) {
+        if (flow === "freeform") return "Freeform Goal";
+        const f = flows.find((x) => x.flow_type === flow);
+        return f ? f.label : flow;
+      }
 
-      // --- tabs; the hash (#run, #runs, #score, #runs/<run_id>) deep-links one
+      // --- tabs; the hash (#run, #runs, #score, #flows, #runs/<run_id>) deep-links one
       function selectTab(name) {
         if (!document.querySelector('nav button[data-tab="' + name + '"]'))
           name = "run";
@@ -570,12 +618,13 @@
 
       // --- form
       function updatePreview() {
+        const freeform = $("task").value === FREEFORM;
         const t = tasks.find((x) => x.id === $("task").value);
-        $("goal-preview").textContent = t
-          ? "flow " + t.flow_type + " · " + t.goal_template
-          : "";
+        $("task-info").hidden = freeform;
+        $("freeform-box").hidden = !freeform;
+        $("task-desc").textContent = t ? t.description : "";
+        $("task-cmd").textContent = t ? t.goal_template : "";
         const flowF = t && t.flow_type === "f";
-        const freeform = $("goal").value.trim() !== "";
         $("fake-note").hidden = !($("fake").checked && (flowF || freeform));
         $("fake-note").textContent =
           "Fake runs of flow-F tasks and freeform goals include one confirmation request " +
@@ -584,20 +633,21 @@
           "), so you can try the gate. It is not the agent's choice.";
       }
       $("task").addEventListener("change", updatePreview);
-      $("goal").addEventListener("input", () => {
-        $("task").disabled = $("goal").value.trim() !== "";
-        updatePreview();
-      });
       $("fake").addEventListener("change", updatePreview);
 
       $("start").addEventListener("click", async () => {
+        const freeform = $("task").value === FREEFORM;
         const goal = $("goal").value.trim();
+        if (freeform && !goal) {
+          $("start-msg").textContent = "Enter a goal.";
+          return;
+        }
         const body = {
           policy: $("policy").value,
           fake: $("fake").checked,
           repeat: Number($("repeat").value) || 1,
         };
-        if (goal) body.goal = goal;
+        if (freeform) body.goal = goal;
         else body.task_id = $("task").value;
         $("start-msg").textContent = "";
         try {
@@ -620,7 +670,7 @@
           el("div", { text: j.job_id + " · " + j.status }),
           el("div", {
             text:
-              (j.task_id || "freeform") +
+              taskLabel(j.task_id) +
               " · policy " +
               j.policy +
               (j.fake ? " · fake" : "") +
@@ -665,7 +715,8 @@
                 : "Cancel requested: the run stops at its next device action.",
             }),
           );
-        $("cancel").hidden = TERMINAL.includes(j.status) || !!j.cancel_requested;
+        $("cancel").hidden =
+          TERMINAL.includes(j.status) || !!j.cancel_requested;
         $("cancel").disabled = false;
       }
       // Hide the screenshot until a run's first step arrives (an img with
@@ -692,8 +743,7 @@
             : current.run_ids.concat(d.run_id);
           current.status = "running";
           showJob(current);
-          $("run-title").textContent =
-            (d.task_id || "freeform") + " · " + d.run_id;
+          $("run-title").textContent = taskLabel(d.task_id) + " · " + d.run_id;
           $("steps").replaceChildren(
             el("li", { class: "muted small", text: "Goal: " + d.goal }),
           );
@@ -925,7 +975,7 @@
                   : r.run_id,
               ),
               el("td", {
-                text: (r.task_id || "freeform") + " (" + r.flow_type + ")",
+                text: taskLabel(r.task_id, r.flow_type),
               }),
               el("td", { text: r.agent_verdict || "none" }),
               el("td", {}, v),
@@ -985,8 +1035,7 @@
       }
       function checks(title, list) {
         const ul = el("ul", { class: "checks" });
-        if (!list.length)
-          ul.append(el("li", { class: "muted", text: "none" }));
+        if (!list.length) ul.append(el("li", { class: "muted", text: "none" }));
         for (const c of list)
           ul.append(
             el(
@@ -1008,7 +1057,9 @@
         const box = $("detail-body");
         $("run-detail").hidden = false;
         $("detail-title").textContent = runId;
-        box.replaceChildren(el("p", { class: "muted small", text: "Loading…" }));
+        box.replaceChildren(
+          el("p", { class: "muted small", text: "Loading…" }),
+        );
         let d;
         try {
           d = await api("/api/runs/" + runId);
@@ -1022,7 +1073,7 @@
         box.append(
           el("p", { text: run.goal }),
           kv([
-            ["task", (run.task_id || "freeform") + " (flow " + run.flow_type + ")"],
+            ["task", taskLabel(run.task_id, run.flow_type)],
             ["model", run.model],
             ["started", run.started_at],
             ["ended", run.ended_at],
@@ -1070,7 +1121,15 @@
         );
         if (!d.trace.length)
           t.append(
-            el("tr", {}, el("td", { colspan: "6", class: "muted", text: "No steps recorded." })),
+            el(
+              "tr",
+              {},
+              el("td", {
+                colspan: "6",
+                class: "muted",
+                text: "No steps recorded.",
+              }),
+            ),
           );
         for (const s of d.trace) {
           const link = (rel, text) =>
@@ -1159,7 +1218,7 @@
       }
 
       // --- scoreboard
-      function scoreTable(rows, keyLabel, key) {
+      function scoreTable(rows, keyLabel, labelOf) {
         const t = el("table");
         t.append(
           el(
@@ -1186,7 +1245,7 @@
               {},
               el("td", {
                 text:
-                  r[key] +
+                  labelOf(r) +
                   (r.oracle_tier != null
                     ? " (tier " + r.oracle_tier + ")"
                     : ""),
@@ -1242,23 +1301,70 @@
             scoreTable(
               g.by_flow.concat([Object.assign({ flow_type: "all" }, g.totals)]),
               "flow",
-              "flow_type",
+              (r) => (r.flow_type === "all" ? "all" : flowLabel(r.flow_type)),
             ),
           );
           box.append(
             el("h2", { class: "small muted", text: "By task" }),
-            scoreTable(g.by_task, "task", "task_id"),
+            scoreTable(g.by_task, "task", (r) =>
+              taskLabel(r.task_id, r.flow_type),
+            ),
           );
         }
       }
       $("reload-score").addEventListener("click", loadScore);
 
+      // --- flows: what each flow measures and the tasks in it
+      function renderFlows() {
+        const box = $("flows");
+        box.replaceChildren();
+        for (const f of flows) {
+          const sec = el(
+            "section",
+            {},
+            el("h2", { text: f.label }),
+            el("p", { class: "small", text: f.description }),
+          );
+          if (!f.tasks.length)
+            sec.append(
+              el("p", { class: "muted small", text: "No tasks yet." }),
+            );
+          else {
+            const t = el(
+              "table",
+              {},
+              el(
+                "tr",
+                {},
+                ...["task", "id", "oracle tier", "what it does"].map((h) =>
+                  el("th", { text: h }),
+                ),
+              ),
+            );
+            for (const x of f.tasks)
+              t.append(
+                el(
+                  "tr",
+                  {},
+                  el("td", { text: x.name }),
+                  el("td", { class: "id small", text: x.id }),
+                  el("td", { text: String(x.oracle_tier) }),
+                  el("td", { text: x.description }),
+                ),
+              );
+            sec.append(el("div", { class: "scroll" }, t));
+          }
+          box.append(sec);
+        }
+      }
+
       // --- boot
       (async function boot() {
         try {
-          [cfg, tasks] = await Promise.all([
+          [cfg, tasks, flows] = await Promise.all([
             api("/api/config"),
             api("/api/tasks"),
+            api("/api/flows"),
           ]);
         } catch (e) {
           $("job").textContent = "Could not load: " + e.message;
@@ -1267,18 +1373,17 @@
         $("model").textContent = "model " + cfg.model;
         $("confirm-timeout").textContent = String(cfg.confirm_timeout_s);
         $("fake").checked = !!cfg.fake_default;
-        for (const t of tasks)
+        for (const t of tasks
+          .slice()
+          .sort((a, b) => a.label.localeCompare(b.label)))
+          $("task").append(el("option", { value: t.id, text: t.label }));
+        // the server refuses freeform runs unless host loopback is blocked
+        // (or it was started with --allow-unblocked); offer it only then
+        if (cfg.freeform_enabled)
           $("task").append(
-            el("option", {
-              value: t.id,
-              text: t.id + " (flow " + t.flow_type + ")",
-            }),
+            el("option", { value: FREEFORM, text: "Freeform Goal" }),
           );
-        if (!cfg.freeform_enabled) {
-          $("goal").disabled = true;
-          $("freeform-note").hidden = false;
-          $("freeform-note").textContent = cfg.freeform_note;
-        }
+        renderFlows();
         updatePreview();
         const [tab, runId] = location.hash.replace(/^#/, "").split("/");
         if (tab) selectTab(tab);

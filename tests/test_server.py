@@ -14,6 +14,7 @@ import uvicorn
 
 from harness.contracts import Config
 from harness.server.app import FAKE_CONFIRM_NOTE, create_app
+from harness.tasks import catalog
 from harness.trace.store import TraceStore
 
 TOKEN = "test-token-123"
@@ -103,7 +104,7 @@ def _start(srv, **body):
 # --- auth -----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/", "/api/tasks", "/api/scoreboard", "/api/jobs/x/events",
+@pytest.mark.parametrize("path", ["/", "/api/tasks", "/api/flows", "/api/scoreboard", "/api/jobs/x/events",
                                   "/runs/20260101-000000-abcdef/replay.html"])
 def test_every_route_requires_the_token(srv, path):
     assert srv.req(path, token=None)[0] == 401
@@ -136,6 +137,24 @@ def test_tasks_list_ids_flows_and_goal_templates(srv):
     by_id = {t["id"]: t for t in tasks}
     assert by_id["f_send_sms"]["flow_type"] == "f"
     assert "{message}" in by_id["f_send_sms"]["goal_template"]
+    assert by_id["c_variant_b"]["label"] == "[Flow C] Checkout on an Alternate UI"
+    assert by_id["c_variant_b"]["flow_name"] == "UI Variation Robustness"
+    assert {t["id"] for t in tasks} == set(catalog.TASKS)
+
+
+def test_flows_list_every_flow_with_its_tasks(srv):
+    status, flows = srv.json("/api/flows")
+    assert status == 200
+    by_flow = {f["flow_type"]: f for f in flows}
+    assert set(by_flow) == {f.value for f in catalog.FLOWS}
+    assert by_flow["b"]["label"] == "[Flow B] Multi-App Information Transfer"
+    status, tasks = srv.json("/api/tasks")
+    assert status == 200
+    nested = {t["id"]: (f["flow_type"], t) for f in flows for t in f["tasks"]}
+    assert {k: v[0] for k, v in nested.items()} == {t["id"]: t["flow_type"] for t in tasks}
+    for t in tasks:
+        n = nested[t["id"]][1]
+        assert (n["label"], n["description"], n["oracle_tier"]) == (t["label"], t["description"], t["oracle_tier"])
 
 
 @pytest.mark.parametrize("body", [{}, {"task_id": "a_markor_note", "goal": "x"}, {"task_id": "nope"},

@@ -74,7 +74,7 @@ from harness.runner import (
     serial_lock,
 )
 from harness.scoreboard.aggregate import FAILURE_TAGS, load_runs_with_tags, load_tags, save_tags, scoreboard
-from harness.tasks import registry
+from harness.tasks import catalog, registry
 from harness.trace.store import RunWriter, TraceStore
 
 log = logging.getLogger(__name__)
@@ -571,8 +571,13 @@ def create_app(
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
         return [{"id": t.id, "flow_type": t.flow_type.value, "goal_template": t.goal,
-                 "oracle_tier": int(t.oracle_tier), "sensitive_actions": list(t.sensitive_actions)}
+                 "oracle_tier": int(t.oracle_tier), "sensitive_actions": list(t.sensitive_actions),
+                 **catalog.task_info(t.id)}
                 for t in registry.all_tasks()]
+
+    @app.get("/api/flows")
+    def flows() -> list[dict[str, Any]]:
+        return catalog.flows()
 
     @app.post("/api/jobs", status_code=201)
     def start_job(req: StartJob) -> dict[str, Any]:
