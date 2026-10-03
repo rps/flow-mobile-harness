@@ -31,7 +31,7 @@ emulator on the VM and call the model, so each takes a few minutes and spends re
 execute one at a time; a second Start waits in the queue. The scoreboard and per-run traces update
 live.
 
-"Ask me here (ui, production recommended)" instead routes each sensitive step to you for approval
+"Ask me here (production recommended)" instead routes each sensitive step to you for approval
 in the page; unanswered prompts reject after the timeout shown in the page. Tick **Fake** to
 exercise the UI without the emulator or the model.
 
@@ -47,3 +47,4 @@ Ctrl-C in the terminal closes the tunnel. Nothing else to clean up.
 | `Permission denied (publickey)`               | wrong key file, or `chmod 600 reviewer_key` not done                                                                 |
 | `{"detail":"token required"}` in the browser  | the token in the URL is wrong or missing                                                                             |
 | `channel ... open failed`                     | something else on your machine already uses port <PORT>; change the first `<PORT>` in the ssh command and in the URL |
+| `IN USE: <name> is running ...` banner        | another tester is using the one device; your job queues behind theirs and starts by itself, so wait (the banner shows your queue position) |

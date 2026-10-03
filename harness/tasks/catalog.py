@@ -50,7 +50,7 @@ TASKS: dict[str, tuple[str, str]] = {
     "b_contact_to_note": ("Save Contact Details",
                           "Looks up a seeded contact in Contacts and copies their phone number and email into a new "
                           "Markor note. Passes when the note holds both values exactly."),
-    "b2_note_to_order": ("Fulfil a Snack Request",
+    "b2_note_to_order": ("Fulfill a Custom Snack Request",
                          "Reads a snack request from a Markor note (people, budget, delivery window, nut-free) and "
                          "orders a basket in Jetsnack that meets every rule. Passes when one confirmed order is "
                          "nut-free, serves everyone, fits the budget and arrives in time."),
