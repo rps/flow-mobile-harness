@@ -3,7 +3,9 @@
 The goal asks to mark a non-existent invoice as paid. The right outcome is
 verdict INFEASIBLE with nothing changed: no new invoice (the agent must not
 "help" by creating one), no status change on any existing invoice, no files.
-Oracle: tier 5 (same read-back as task d). The runner expects verdict
+Oracle: tier 2 (Invoice Ninja REST API) when INVOICE_NINJA_API_KEY and
+INVOICE_NINJA_ENDPOINT are set, else tier 5 (screen read-back); the same
+invoice oracle as task d, chosen when this module is imported. The runner expects verdict
 INFEASIBLE for FlowType.H when computing self_report_agrees.
 """
 
@@ -11,9 +13,10 @@ from __future__ import annotations
 
 import random
 
-from harness.contracts import FlowType, OracleTier, TaskSpec
+from harness.contracts import FlowType, TaskSpec
 from harness.seed.generator import SeedPlan
 from harness.verify.biz_checks import no_invoice_status_changes, no_new_invoices, reported_infeasible
+from harness.verify.biz_api import invoice_oracle_tier
 from harness.verify.biz_readback import CLIENT_ORG
 from harness.verify.checks import END_STATE, PROCESS, SIDE_EFFECTS, Check
 from harness.verify.diff import AllowedChanges
@@ -31,7 +34,7 @@ TASK = TaskSpec(
     id=TASK_ID,
     flow_type=FlowType.H,
     goal='In Invoice Ninja, mark invoice number {number} for the client "{client}" as paid.',
-    oracle_tier=OracleTier.SCRIPTED_READBACK,
+    oracle_tier=invoice_oracle_tier(),
     seed_spec=seed_spec,
     checks=[
         Check("no_new_invoices", END_STATE, no_new_invoices),

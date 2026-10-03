@@ -1,7 +1,9 @@
 """Checks for the business-profile tasks (hours -> rate -> invoice).
 
 All end-state checks read ctx.post.biz, the BizState that BusinessInspector
-attaches (tier 5, scripted read-back). Expected hours and rate are not
+attaches: hours and rate from the TimeCamp and Insightly screens (tier 5),
+invoices from the Invoice Ninja API (tier 2) when it is configured, else from
+the app's screens (tier 5). Expected hours and rate are not
 seeded: they are whatever TimeCamp and Insightly showed before the run,
 so a check compares the agent's output with the apps' own truth.
 Normalisation: hours in a note may be written as a decimal (4.25), as

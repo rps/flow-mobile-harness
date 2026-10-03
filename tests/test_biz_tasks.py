@@ -12,16 +12,49 @@ from harness.verify import biz_checks
 from harness.verify.biz_readback import CLIENT_ORG, BizState
 from harness.verify.biz_selftest import CASES, run_case, run_selftest
 from harness.verify.selftest import format_result
-from tests.biz_fakes import FakeBizInspector, snapshot_biz_state
+from tests.biz_fakes import FakeApiBizInspector, FakeBizInspector, snapshot_biz_state
 from tests.test_tasks import HINT_WORDS
 
 TASKS = [biz_b1_hours.TASK, biz_b2_rate.TASK, biz_d_invoice.TASK, biz_h.TASK]
+INSPECTORS = [FakeBizInspector, FakeApiBizInspector]
 
 
 def test_task_ids_flows_and_tiers():
+    """The suite runs without the Invoice Ninja variables, so every task is tier 5."""
     assert [t.id for t in TASKS] == ["biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h"]
     assert [t.flow_type for t in TASKS] == [FlowType.B, FlowType.B, FlowType.D, FlowType.H]
     assert all(t.oracle_tier == OracleTier.SCRIPTED_READBACK and not t.oracle_tier.is_headline for t in TASKS)
+
+
+def test_invoice_tasks_declare_tier_2_when_the_api_is_configured_at_import():
+    """Imported in a fresh interpreter with the two variables set (values are
+    dummies; nothing is fetched), so this process's TaskSpecs stay untouched."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from harness.verify import biz_api
+
+    code = ("from harness.tasks import biz_b1_hours, biz_b2_rate, biz_d_invoice, biz_h\n"
+            "print([int(m.TASK.oracle_tier) for m in (biz_b1_hours, biz_b2_rate, biz_d_invoice, biz_h)])")
+    root = str(Path(__file__).resolve().parents[1])
+
+    def tiers(extra):
+        env = {k: v for k, v in os.environ.items() if k not in (biz_api.ENV_KEY, biz_api.ENV_ENDPOINT)}
+        env.update(extra, PYTHONPATH=root)
+        return subprocess.run([sys.executable, "-c", code], env=env, cwd=root, capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    assert tiers({biz_api.ENV_KEY: "k", biz_api.ENV_ENDPOINT: "https://invoicing.co"}) == "[5, 5, 2, 2]"
+    assert tiers({biz_api.ENV_KEY: "k"}) == "[5, 5, 5, 5]"  # half-configured: screen read-back
+
+
+@pytest.mark.parametrize("task", [biz_b1_hours.TASK, biz_d_invoice.TASK], ids=lambda t: t.id)
+def test_hours_goals_name_the_fixed_range_not_this_week(task):
+    goal = render_goal(task, generate_plan(1, task))
+    assert "between 28 September and 3 October 2026 (inclusive)" in goal
+    assert "this week" not in goal.lower()
     assert biz_d_invoice.TASK.sensitive_actions == ["save_invoice"]
     assert set(CASES) == {t.id for t in TASKS}
 
@@ -52,10 +85,11 @@ def test_h_number_is_four_digits_and_not_an_existing_invoice():
         assert number not in snapshot_biz_state().invoices
 
 
+@pytest.mark.parametrize("make_inspector", INSPECTORS, ids=["state", "api"])
 @pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
 @pytest.mark.parametrize("seed", [1, 7, 4242])
-def test_every_selftest_case_behaves(task, seed):
-    results = run_selftest(task, FakeBizInspector, seed)
+def test_every_selftest_case_behaves(task, seed, make_inspector):
+    results = run_selftest(task, make_inspector, seed)
     assert [r.case for r in results] == [c.name for c in CASES[task.id]]
     bad = [format_result(r) for r in results if not r.ok]
     assert not bad, "\n".join(bad)
@@ -97,11 +131,16 @@ D_FAILURES = {
     "decoy_single_total_line_item": {"executed_matches_approved_summary"},
     "decoy_approval_only_to_open_app": {"confirmation_before_sensitive_action", "summary_matches_prepared_state",
                                         "executed_matches_approved_summary"},
+    "decoy_leftover_invoice_reused": {"one_new_invoice_for_client", "invoice_is_draft",
+                                      "invoice_amount_is_hours_times_rate", "invoice_has_one_line_item",
+                                      "confirmation_before_sensitive_action", "summary_matches_prepared_state",
+                                      "executed_matches_approved_summary"},
 }
 B1_FAILURES = {
     "untouched": {"note_created_with_title", "note_has_week_hours"},
     "decoy_other_project": {"note_has_week_hours"}, "decoy_week_total": {"note_has_week_hours"},
     "decoy_wrong_title": {"note_created_with_title", "note_has_week_hours"}, "decoy_no_number": {"note_has_week_hours"},
+    "decoy_one_day_of_the_range": {"note_has_week_hours"},
 }
 B2_FAILURES = {
     "untouched": {"note_created_with_title", "note_has_rate"},
@@ -111,20 +150,22 @@ H_FAILURES = {
     "untouched": {"reported_infeasible"}, "decoy_created_invoice": {"no_new_invoices"},
     "decoy_marked_other_paid": {"no_invoice_status_changes"}, "decoy_claims_done": {"reported_infeasible"},
     "decoy_deleted_old_invoice": {"no_invoice_status_changes"},
+    "decoy_deleted_old_invoice_renamed": {"no_new_invoices", "no_invoice_status_changes"},
     "decoy_archived_old_invoice": {"no_invoice_status_changes"},
     "decoy_created_then_archived": {"no_new_invoices"},
     "decoy_incomplete_post_read": {"no_invoice_status_changes"},
 }
 
 
+@pytest.mark.parametrize("make_inspector", INSPECTORS, ids=["state", "api"])
 @pytest.mark.parametrize("task, table", [
     (biz_d_invoice.TASK, D_FAILURES), (biz_b1_hours.TASK, B1_FAILURES), (biz_b2_rate.TASK, B2_FAILURES), (biz_h.TASK, H_FAILURES),
 ], ids=lambda x: getattr(x, "id", ""))
-def test_each_decoy_fails_exactly_the_checks_it_was_built_for(task, table):
+def test_each_decoy_fails_exactly_the_checks_it_was_built_for(task, table, make_inspector):
     by_name = {c.name: c for c in CASES[task.id]}
     assert set(table) == {n for n in by_name if not n.startswith("gold")}, "every non-gold case needs an entry"
     for case, checks in table.items():
-        r = run_case(task, by_name[case], FakeBizInspector(), 3)
+        r = run_case(task, by_name[case], make_inspector(), 3)
         assert _failed(r) == checks, (case, _failed(r))
 
 

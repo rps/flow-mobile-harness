@@ -183,6 +183,44 @@ def test_business_inspector_closes_apps_when_readback_fails(monkeypatch):
     assert scripted.closed == 1
 
 
+def test_business_inspector_reads_invoices_from_the_api_and_never_opens_the_app(monkeypatch):
+    from harness.device.inspect import DeviceState, Inspector
+    from harness.verify.biz_api import InvoiceNinjaApi
+    from tests.biz_fakes import API_ROOT, FakeInvoiceServer
+
+    monkeypatch.setattr(Inspector, "snapshot_state", lambda self: DeviceState())
+    scripted = ScriptedReadback()
+    server = FakeInvoiceServer([{"id": "nw", "name": "Northwind Traders"}], [
+        {"id": "a", "number": "0001_Deleted", "client_id": "nw", "amount": 403.75, "status_id": "1",
+         "is_deleted": True, "archived_at": 1, "line_items": []}])
+    insp = BusinessInspector("emulator-0000", readback=scripted, invoice_api=InvoiceNinjaApi(API_ROOT, "t", opener=server))
+    pre = insp.snapshot_state()
+    assert pre.biz.invoices["0001_Deleted"].state == "Deleted" and pre.biz.invoices_complete
+    server.invoices.append({"id": "b", "number": "0003", "client_id": "nw", "amount": 403.75, "status_id": "1",
+                            "is_deleted": False, "archived_at": None,
+                            "line_items": [{"product_key": "Consulting", "quantity": 4.25, "cost": 95, "line_total": 403.75}]})
+    post = insp.snapshot_state()
+    assert post.biz.invoices["0003"].items == (LineItem("Consulting", 403.75, 4.25, 95.0),)  # items without a detail view
+    assert post.biz.project_hours == {"Northwind Traders": 4.25}
+    assert scripted.calls == ["timecamp", ("insightly", rb.CLIENT_ORG)]  # no screen invoice read at all
+    assert scripted.closed == 2
+
+
+def test_business_inspector_api_failure_raises_instead_of_falling_back_to_the_screen(monkeypatch):
+    from harness.device.inspect import DeviceState, Inspector
+    from harness.verify.biz_api import InvoiceNinjaApi, InvoiceNinjaError
+    from tests.biz_fakes import API_ROOT, FakeInvoiceServer
+
+    monkeypatch.setattr(Inspector, "snapshot_state", lambda self: DeviceState())
+    scripted = ScriptedReadback()
+    server = FakeInvoiceServer([], [], fail={"/api/v1/clients": 401})
+    insp = BusinessInspector("emulator-0000", readback=scripted, invoice_api=InvoiceNinjaApi(API_ROOT, "t", opener=server))
+    with pytest.raises(InvoiceNinjaError, match="HTTP 401"):
+        insp.snapshot_state()
+    assert not any(c[0] == "invoices" for c in scripted.calls if isinstance(c, tuple))
+    assert scripted.closed == 1
+
+
 # --- Driver paths, with the device replaced by scripted screens -------------------
 
 
@@ -218,20 +256,145 @@ class ScreenReadback(rb.BizReadback):
         return ""
 
 
+# TimeCamp screens as dumped live on 2026-10-03 (Reports -> Custom -> date pickers).
 TC_HOME = [_n(text="Timesheet")]
-TC_REPORT = [_n(text="This Week"), _n("Total time, 11h 15m"), _n("Northwind Traders, 4h 15m"), _n("Android Flow, 2h 0m")]
+TC_CHIPS = [_n(text="This Week", bounds=(29, 350, 231, 401)), _n(text="Custom", bounds=(849, 350, 1051, 401))]
+TC_OK = _n("Ok", bounds=(540, 1337, 1054, 1402))
+PREV, NEXT, PICKER_OK = (261, 921), (819, 921), (802, 1802)
 
 
-def test_timecamp_reader_reads_the_report_after_the_tab_appears():
-    r = ScreenReadback([TC_HOME, [_n(text="Timesheet")], TC_REPORT])
+def tc_dialog(start, end):
+    return TC_CHIPS + [_n(text="Select a dates range"), _n(start, bounds=(79, 1211, 514, 1290)),
+                       _n(end, bounds=(567, 1211, 1002, 1290)), TC_OK]
+
+
+def day_xy(day):
+    return 50, 1005 + 10 * day
+
+
+def picker(month, year=2026, checked=None):
+    """Android date picker: OK, month arrows and one cell per day ('28 September 2026')."""
+    days = [_n(f"{d:02d} {month} {year}", text=str(d), bounds=(0, 1000 + 10 * d, 100, 1010 + 10 * d),
+               checked=d == checked) for d in range(1, 31)]
+    return [_n(text="OK", bounds=(718, 1731, 886, 1873)), _n("Previous month", bounds=(198, 858, 324, 984)),
+            _n("Next month", bounds=(756, 858, 882, 984))] + days
+
+
+TC_REPORT = TC_CHIPS + [_n(text="28.09-03.10 2026"), _n("Total time, 11h 15m"), _n("Northwind Traders, 4h 15m"),
+                        _n("Android Flow, 2h 0m")]
+TC_FIXED_RANGE = [
+    TC_HOME, TC_CHIPS,
+    tc_dialog("2026-10-02", "2026-10-02"), picker("October"), picker("September"), picker("September", checked=28),
+    tc_dialog("2026-09-28", "2026-10-02"), picker("October"), picker("October", checked=3),
+    tc_dialog("2026-09-28", "2026-10-03"), TC_REPORT,
+]
+
+
+def test_date_helpers_match_the_strings_timecamp_and_the_picker_show():
+    from datetime import date
+
+    assert rb.range_phrase() == "28 September and 3 October 2026"
+    assert rb.range_phrase(date(2025, 12, 29), date(2026, 1, 3)) == "29 December 2025 and 3 January 2026"
+    assert rb.report_header(rb.REPORT_START, rb.REPORT_END) == "28.09-03.10 2026"
+    assert rb.report_header(date(2026, 9, 7), date(2026, 9, 8)) == "07-08 Sep 2026"  # same month, seen live
+    assert rb.report_header(date(2026, 8, 31), date(2026, 9, 1)) == "31.08-01.09 2026"
+    assert rb.picker_label(date(2026, 10, 3)) == "03 October 2026"
+    assert rb.picker_month([n["desc"] for n in picker("September")]) == (2026, 9)
+    assert rb.picker_month(["01 October 2026", "30 September 2026", "02 October 2026"]) == (2026, 10)
+    assert rb.picker_month(["OK", "Previous month"]) is None
+
+
+def test_timecamp_reader_selects_the_fixed_range_and_reads_its_report():
+    r = ScreenReadback(TC_FIXED_RANGE)
     assert r.timecamp_project_hours() == {"Northwind Traders": 4.25, "Android Flow": 2.0}
-    assert ("tap",) + rb.TIMECAMP_REPORTS_TAB in r.log
+    taps = [t[1:] for t in r.log if t[0] == "tap"]
+    assert taps == [rb.TIMECAMP_REPORTS_TAB, (950, 375),  # Reports, Custom
+                    (296, 1250), PREV, day_xy(28), PICKER_OK,  # From: back one month, 28 September
+                    (784, 1250), day_xy(3), PICKER_OK,  # To: 3 October is on the opening page
+                    (797, 1369)]  # Ok
 
 
-def test_timecamp_reader_raises_when_this_week_never_appears(monkeypatch):
+def test_timecamp_reader_pages_forward_for_a_later_month_and_reads_an_empty_range():
+    from datetime import date
+
+    empty = TC_CHIPS + [_n(text="02-03 Nov 2026"), _n(text="Please fill your timesheet to see reports for"),
+                        _n(text="02-03 Nov 2026")]
+    r = ScreenReadback([TC_HOME, TC_CHIPS, tc_dialog("2026-10-02", "2026-10-02"), picker("October"),
+                        picker("November"), picker("November", checked=2),
+                        tc_dialog("2026-11-02", "2026-10-02"), picker("October"), picker("November"),
+                        picker("November", checked=3), tc_dialog("2026-11-02", "2026-11-03"), empty])
+    assert r.timecamp_project_hours(date(2026, 11, 2), date(2026, 11, 3)) == {}
+    taps = [t[1:] for t in r.log if t[0] == "tap"]
+    assert taps.count(NEXT) == 2 and PREV not in taps
+
+
+def test_timecamp_reader_waits_until_the_rows_read_the_same_twice():
+    """Rows carry no range: a first dump that already has the new header but
+    old rows must not be returned."""
+    stale_rows = TC_CHIPS + [_n(text="28.09-03.10 2026"), _n("Total time, 0h 30m"), _n("Northwind Traders, 0h 30m")]
+    r = ScreenReadback(TC_FIXED_RANGE[:-1] + [stale_rows, TC_REPORT])
+    assert r.timecamp_project_hours() == {"Northwind Traders": 4.25, "Android Flow": 2.0}
+
+
+def test_timecamp_reader_rejects_an_empty_state_for_another_range(monkeypatch):
+    from datetime import date
+
     monkeypatch.setattr(rb, "SCREEN_TIMEOUT_S", 0.0)
-    r = ScreenReadback([TC_HOME, [_n(text="Last Week")]])
-    with pytest.raises(DeviceError, match="This Week"):
+    stale = TC_CHIPS + [_n(text="07-08 Sep 2026"), _n(text="Please fill your timesheet to see reports for"),
+                        _n(text="03-03 Oct 2026")]  # header updated, empty state still the opening range
+    r = ScreenReadback([TC_HOME, TC_CHIPS, tc_dialog("2026-10-02", "2026-10-02"), picker("September"),
+                        picker("September", checked=7), tc_dialog("2026-09-07", "2026-10-02"), picker("September"),
+                        picker("September", checked=8), tc_dialog("2026-09-07", "2026-09-08"), stale])
+    with pytest.raises(DeviceError, match="07-08 Sep 2026"):
+        r.timecamp_project_hours(date(2026, 9, 7), date(2026, 9, 8))
+
+
+def test_timecamp_reader_does_not_accept_a_report_for_another_period(monkeypatch):
+    monkeypatch.setattr(rb, "SCREEN_TIMEOUT_S", 0.0)
+    stale = TC_CHIPS + [_n(text="27.09-03.10 2026"), _n("Northwind Traders, 4h 15m"), _n("Total time, 11h 15m")]
+    r = ScreenReadback(TC_FIXED_RANGE[:-1] + [stale])
+    with pytest.raises(DeviceError, match="28.09-03.10 2026"):
+        r.timecamp_project_hours()
+
+
+def test_pick_date_pages_forward_across_a_year_boundary():
+    from datetime import date
+
+    r = ScreenReadback([picker("December", year=2025), picker("January"), picker("January", checked=3)])
+    r._pick_date(_n("2025-12-01", bounds=(79, 1211, 514, 1290)), date(2026, 1, 3))
+    taps = [t[1:] for t in r.log if t[0] == "tap"]
+    assert taps == [(296, 1250), NEXT, day_xy(3), PICKER_OK]
+
+
+def test_pick_date_raises_when_the_day_never_shows_selected(monkeypatch):
+    from datetime import date
+
+    monkeypatch.setattr(rb, "SCREEN_TIMEOUT_S", 0.0)
+    r = ScreenReadback([picker("October")])  # tapping 3 October never ticks it
+    with pytest.raises(DeviceError, match="03 October 2026 selected"):
+        r._pick_date(_n("2026-10-02"), date(2026, 10, 3))
+    assert ("tap",) + PICKER_OK not in r.log  # OK is never pressed on an unconfirmed day
+
+
+def test_pick_date_raises_when_the_picker_disappears_while_paging():
+    from datetime import date
+
+    r = ScreenReadback([picker("October"), [_n(text="OK")]])
+    with pytest.raises(DeviceError, match="date picker lost while paging to 28 September 2026"):
+        r._pick_date(_n("2026-10-02"), date(2026, 9, 28))
+
+
+def test_timecamp_reader_raises_when_the_custom_chip_or_a_day_never_appears(monkeypatch):
+    monkeypatch.setattr(rb, "SCREEN_TIMEOUT_S", 0.0)
+    with pytest.raises(DeviceError, match="Reports tab"):
+        ScreenReadback([TC_HOME, [_n(text="Timesheet")]]).timecamp_project_hours()
+    monkeypatch.setattr(rb, "MAX_MONTH_STEPS", 3)
+    r = ScreenReadback([TC_HOME, TC_CHIPS, tc_dialog("2026-10-02", "2026-10-02"), picker("October", year=2030)])
+    with pytest.raises(DeviceError, match="never showed 28 September 2026"):
+        r.timecamp_project_hours()
+    no_arrows = [n for n in picker("October") if "month" not in n["desc"]]
+    r = ScreenReadback([TC_HOME, TC_CHIPS, tc_dialog("2026-10-02", "2026-10-02"), no_arrows])
+    with pytest.raises(DeviceError, match="no 'Previous month' button"):
         r.timecamp_project_hours()
 
 
@@ -274,7 +437,10 @@ def test_insightly_reader_raises_when_the_record_does_not_open(monkeypatch):
 
 
 NIN_SHELL = [_n("Menu Sidebar")]
-NIN_SIDEBAR = [_n("Invoices")]
+# Live layout on 2026-10-03: the phone-verification banner pushes Invoices to y 808-934.
+NIN_SIDEBAR = [_n("Invoices", bounds=(0, 808, 714, 934)), _n("New Invoice", bounds=(557, 808, 683, 934)),
+               _n("Recurring Invoices", bounds=(0, 934, 714, 1086))]
+INVOICES_ROW_TAP = ("tap", 357, 871)
 ROW1 = _n("ZZ Probe Test Client\n$120.00\n0001 • 10/01/2026\nSent", bounds=(0, 401, 1080, 590))
 ROW2 = _n("Northwind Traders\n$403.75\n0002 • 10/02/2026\nDraft", bounds=(0, 594, 1080, 783))
 LIST = [_n("New Invoice"), ROW1, ROW2]
@@ -382,8 +548,9 @@ def test_invoice_reader_rescans_from_the_top_after_each_detail_view():
     out, complete = r.invoice_ninja_invoices(known={"0001"})
     assert complete and set(out) == {"0001", "0002", "0003"}
     assert out["0002"].items and out["0003"].items == (LineItem("Review", 50.0, 0.5, 100.0),)
-    opens = [t for t in r.log if t == ("tap",) + rb.IN_SIDEBAR_INVOICES]
+    opens = [t for t in r.log if t == INVOICES_ROW_TAP]
     assert len(opens) == 3  # initial open plus one re-open per detail view
+    assert ("tap", 357, 1010) not in r.log  # never Recurring Invoices
 
 
 def test_nodes_retries_transient_dump_failures(monkeypatch):

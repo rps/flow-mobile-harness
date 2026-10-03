@@ -23,7 +23,14 @@ stay refused; the AVD is created by apps-probe/business_avd.py (the manager
 only knows the google_apis image); the three apps keep their data on vendor
 servers, so a snapshot restore does not undo an invoice the agent created.
 
-CLI: python -m harness.emulator.profiles.business {start,stop,restore,status,record-baseline}
+Invoice oracle: with INVOICE_NINJA_API_KEY and INVOICE_NINJA_ENDPOINT in
+os.environ (export them in the shell; nothing here reads .env), invoices are
+read from the Invoice Ninja API (tier 2) and run_scored deletes the test
+client's earlier invoices before a biz_d_invoice run, recording them in
+meta["invoice_cleanup"]; meta["oracle"] says which oracle each value came from.
+
+CLI: python -m harness.emulator.profiles.business
+     {start,stop,restore,status,record-baseline,env,cleanup-invoices}
 """
 
 from __future__ import annotations
@@ -60,6 +67,8 @@ APPS = {
     "invoice_ninja": "com.invoiceninja.app",
     "markor": "net.gsantner.markor",
 }
+INVOICE_TASKS = ("biz_d_invoice", "biz_h")  # tasks whose oracle tier follows the invoice oracle
+CLEANUP_TASKS = ("biz_d_invoice",)  # tasks that need no earlier invoice for the client
 
 
 class ProfileError(DeviceError):
@@ -184,47 +193,108 @@ def record_baseline() -> dict:
     return info
 
 
-def env(config, windowed: bool = True):
+def cleanup_invoices(api=None) -> dict:
+    """Delete (soft, via the API) every not-yet-deleted invoice of the test
+    client CLIENT_ORG, so biz_d_invoice starts with none; other clients'
+    invoices are never touched. Raises ProfileError without API credentials."""
+    from harness.verify import biz_api
+    from harness.verify.biz_readback import CLIENT_ORG
+
+    api = api if api is not None else biz_api.from_env()
+    if api is None:
+        raise ProfileError(f"invoice cleanup needs {biz_api.ENV_KEY} and {biz_api.ENV_ENDPOINT} in the environment")
+    return biz_api.cleanup_client_invoices(api, CLIENT_ORG)
+
+
+def oracle_meta(api) -> dict:
+    """Which oracle each business value comes from, for run meta."""
+    from harness.verify.biz_readback import REPORT_END, REPORT_START
+
+    return {"invoices": "invoice_ninja_api" if api is not None else "invoice_ninja_screen_readback",
+            "invoices_tier": 2 if api is not None else 5,
+            "hours": "timecamp_screen_readback", "hours_range": f"{REPORT_START.isoformat()}..{REPORT_END.isoformat()}",
+            "rate": "insightly_screen_readback"}
+
+
+def env(config, windowed: bool = True, invoice_api=None):
     """harness.cli.Env for this profile: boots the AVD if needed and pairs the
-    agent device with a BusinessInspector (tier-5 read-back). Refuses to build
-    when business.json is missing or inconsistent. Prefer run_scored(), which
-    also pins baseline_json so the runner never consults the default profile's
-    record."""
+    agent device with a BusinessInspector (tier-5 read-back; invoices from
+    `invoice_api`, else from the API when the environment configures it,
+    else from the screen). Refuses to build when business.json is missing or
+    inconsistent. Prefer run_scored(), which also pins baseline_json so the
+    runner never consults the default profile's record."""
     from harness.cli import Env
     from harness.device.adb import AdbDevice
+    from harness.verify import biz_api
     from harness.verify.biz_readback import BusinessInspector
 
     baseline_info()
+    if invoice_api is None:
+        invoice_api = biz_api.from_env()
     if not online():
         log.info("booted %s in %.1fs", SERIAL, start(windowed=windowed))
     return Env(
         config=config,
         emulator=sys.modules[__name__],
         device_factory=lambda: AdbDevice(SERIAL, config),
-        inspector_factory=lambda: BusinessInspector(SERIAL),
+        inspector_factory=lambda: BusinessInspector(SERIAL, invoice_api=invoice_api),
     )
 
 
 def run_scored(task_id: str, config, confirm_policy, store, *, windowed: bool = True, **kwargs):
     """runner.run_task for one registered task on this profile. Freeform goals
-    cannot be passed; baseline_json is always this profile's record."""
+    cannot be passed; baseline_json is always this profile's record.
+    The invoice oracle (API or screen) is chosen from the environment; a task
+    whose declared tier disagrees with it (environment changed after the
+    task modules were imported) is refused. For biz_d_invoice with the API
+    configured, the client's earlier invoices are deleted when the runner
+    builds the inspector: after the snapshot restore, under the serial lock,
+    and never for a run cancelled while queued. The result lands in
+    meta["invoice_cleanup"] (the runner copies meta shallowly, so the dict
+    placed there is the one run.json records); a failed cleanup ends the run
+    with termination ERROR at stage "seed"."""
     from harness.runner import run_task
+    from harness.tasks import registry
+    from harness.verify import biz_api
 
     assert_scored(task_id, None)
-    e = env(config, windowed=windowed)
+    api = biz_api.from_env()
+    task = registry.get(task_id)
+    want = biz_api.invoice_oracle_tier()
+    if task_id in INVOICE_TASKS and task.oracle_tier != want:
+        raise ProfileError(f"{task_id} declares oracle tier {int(task.oracle_tier)} but the environment selects "
+                           f"tier {int(want)}; set or unset {biz_api.ENV_KEY}/{biz_api.ENV_ENDPOINT} before starting")
+    meta = kwargs.setdefault("meta", {})
+    meta["profile"] = "business"
+    meta["oracle"] = oracle_meta(api)
+    e = env(config, windowed=windowed, invoice_api=api)
+    inspector_factory = e.inspector_factory
+    if task_id in CLEANUP_TASKS:
+        record = {"status": "skipped: invoice API not configured"} if api is None else {"status": "pending"}
+        meta["invoice_cleanup"] = record
+
+        def inspector_factory(base=e.inspector_factory):
+            if api is not None:
+                try:
+                    result = cleanup_invoices(api)
+                except Exception as exc:
+                    record["status"] = f"failed: {type(exc).__name__}: {exc}"
+                    raise
+                record.update(result, status="done")
+            return base()
     kwargs.pop("goal", None)
     kwargs["baseline_json"] = BASELINE_JSON
     kwargs["windowed"] = windowed  # the runner's restore-retry cold boot uses it
     # Scored runs must not wander into the Play Store (installs, account prompts).
     kwargs["block_packages"] = (*SCORED_BLOCKED_PACKAGES, *kwargs.get("block_packages", ()))
-    kwargs.setdefault("meta", {})["profile"] = "business"
     return run_task(task_id, None, config, confirm_policy, device_factory=e.device_factory,
-                    inspector_factory=e.inspector_factory, emulator=e.emulator, store=store, **kwargs)
+                    inspector_factory=inspector_factory, emulator=e.emulator, store=store, **kwargs)
 
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="python -m harness.emulator.profiles.business")
-    p.add_argument("command", choices=["start", "stop", "restore", "status", "record-baseline", "env"])
+    p.add_argument("command", choices=["start", "stop", "restore", "status", "record-baseline", "env",
+                                       "cleanup-invoices"])
     p.add_argument("--no-window", action="store_true", help="boot headless (default is windowed)")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -241,6 +311,8 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(record_baseline(), indent=2))
     elif a.command == "env":
         print(ENV_PREFIX)
+    elif a.command == "cleanup-invoices":
+        print(json.dumps(cleanup_invoices(), indent=2))
 
 
 if __name__ == "__main__":

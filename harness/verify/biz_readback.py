@@ -3,8 +3,10 @@
 The Play image has no root and the owner has configured no API tokens, so the
 verifier reads the apps' own screens through uiautomator:
 
-- TimeCamp: the Reports tab, "This Week", lists one row per project with its
-  total ("Northwind Traders, 4h 15m").
+- TimeCamp: the Reports tab with the Custom period set to the fixed range
+  REPORT_START..REPORT_END (not "This Week", which rolls over and whose week
+  start differs between Timesheet and Reports) lists one row per project with
+  its total ("Northwind Traders, 4h 15m").
 - Insightly: the organisation record's Description field holds the rate
   ("Hourly rate: 95 USD per hour"); the record is reached through search.
 - Invoice Ninja: the Invoices list rows ("Client\\n$403.75\\n0001 • 10/02/2026\\nDraft",
@@ -13,7 +15,9 @@ verifier reads the apps' own screens through uiautomator:
   detail view's line items ("Consulting hours\\n$403.75\\n4.25 x $95.00").
   The list is always read with the Filter sheet set to Active + Archived +
   Deleted, so pre and post reads see the same population whatever the agent
-  did to the filter.
+  did to the filter. When INVOICE_NINJA_API_KEY and INVOICE_NINJA_ENDPOINT
+  are set, BusinessInspector reads invoices from the REST API instead
+  (harness/verify/biz_api.py, tier 2) and never opens the app.
 
 Parsing is pure and unit-tested; BizReadback drives the device and is only
 exercised on the emulator. Coordinates are those of the pixel_7 profile
@@ -29,8 +33,11 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
+from typing import Any
 
 from harness.contracts import DeviceError
 from harness.device.adb_shell import adb, shell
@@ -47,12 +54,15 @@ APPS = (TIMECAMP, INSIGHTLY, INVOICE_NINJA)
 CLIENT_ORG = "Northwind Traders"
 DECOY_ORG = "Northwind Logistics"
 ORGS_TO_READ = (CLIENT_ORG,)  # the decoy's rate is never checked; reading it cost ~30 s per run
+# Fixed report period (owner decision, 2026-10-03): Mon 28 Sep to Sat 3 Oct 2026
+# covers the seeded Northwind entries (30 Sep 1h 45m, 1 Oct 2h 30m = 4h 15m).
+REPORT_START = date(2026, 9, 28)
+REPORT_END = date(2026, 10, 3)
 
 # Taps, in real pixels, valid for the 1080x2400 pixel_7 profile.
 TIMECAMP_REPORTS_TAB = (324, 2276)
 INSIGHTLY_SEARCH = (765, 199)
 IN_SIDEBAR = (73, 210)
-IN_SIDEBAR_INVOICES = (300, 997)
 IN_BACK = (73, 210)
 IN_FILTER_BUTTON = (326, 2273)
 IN_STATES = ("Active", "Archived", "Deleted")  # Filter sheet checkboxes
@@ -67,6 +77,11 @@ _NUMBER = r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
 _RATE_LABELLED = re.compile(r"(?i)hourly rate\D{0,12}?" + _NUMBER)
 _RATE_PER_HOUR = re.compile(r"(?i)\$?\s*" + _NUMBER + r"\s*(?:USD)?\s*(?:/|per)\s*h(?:ou)?r")
 _INVOICE_NUMBER = re.compile(r"^(?=.*\d)[\w.\-/]+$")
+_PICKER_DAY = re.compile(r"^\d\d (?P<month>[A-Z][a-z]+) (?P<year>\d{4})$")
+_ISO_DATE = re.compile(r"^\d{4}-\d\d-\d\d$")
+MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+          "November", "December")
+MAX_MONTH_STEPS = 24
 DUMP_RETRIES = 3
 MAX_LIST_PAGES = 10
 SCREEN_TIMEOUT_S = 30.0  # how long a screen may take to appear
@@ -97,8 +112,8 @@ class Invoice:
 
 @dataclass
 class BizState:
-    """What the three apps show. project_hours: TimeCamp project -> hours this
-    week. org_descriptions: Insightly organisation -> Description text ("" when
+    """What the three apps show. project_hours: TimeCamp project -> hours in
+    REPORT_START..REPORT_END. org_descriptions: Insightly organisation -> Description text ("" when
     empty, absent when the organisation was not found). invoices: number -> Invoice."""
 
     project_hours: dict[str, float] = field(default_factory=dict)
@@ -113,6 +128,35 @@ class BizDeviceState(DeviceState):
 
 
 # --- Pure parsers ------------------------------------------------------------
+
+
+def range_phrase(start: date = REPORT_START, end: date = REPORT_END) -> str:
+    """'28 September and 3 October 2026' (goal text)."""
+    first = f"{start.day} {MONTHS[start.month - 1]}" + ("" if start.year == end.year else f" {start.year}")
+    return f"{first} and {end.day} {MONTHS[end.month - 1]} {end.year}"
+
+
+def report_header(start: date, end: date) -> str:
+    """TimeCamp's Reports header for a custom range, as dumped live on
+    2026-10-03: '28.09-03.10 2026' across months, '07-08 Sep 2026' within one
+    month. The empty state repeats the same label under "Please fill your
+    timesheet to see reports for". (A range across years was not seen.)"""
+    if (start.year, start.month) == (end.year, end.month):
+        return f"{start.day:02d}-{end.day:02d} {MONTHS[end.month - 1][:3]} {end.year}"
+    return f"{start.day:02d}.{start.month:02d}-{end.day:02d}.{end.month:02d} {end.year}"
+
+
+def picker_label(d: date) -> str:
+    """content-desc of a day in the Android date picker: '28 September 2026'."""
+    return f"{d.day:02d} {MONTHS[d.month - 1]} {d.year}"
+
+
+def picker_month(descs: list[str]) -> tuple[int, int] | None:
+    """(year, month) the date picker shows: the most common month among the
+    day cells (a page mid-animation can show two)."""
+    seen = Counter((int(m.group("year")), MONTHS.index(m.group("month")) + 1)
+                   for m in (_PICKER_DAY.match(d) for d in descs) if m and m.group("month") in MONTHS)
+    return seen.most_common(1)[0][0] if seen else None
 
 
 def parse_duration(text: str) -> float | None:
@@ -309,15 +353,73 @@ class BizReadback:
                 self.tap(*retap)
             self._sleep(2)
 
-    def timecamp_project_hours(self) -> dict[str, float]:
+    def timecamp_project_hours(self, start: date = REPORT_START, end: date = REPORT_END) -> dict[str, float]:
+        """Project totals for start..end (inclusive): Reports -> Custom ->
+        From/To date pickers -> Ok. An empty range yields {}. The picker
+        refuses future days (seen live), so `end` must not be after today.
+
+        Stale-screen guard: the report is accepted only when the header names
+        the range and, for an empty range, the empty-state label names it too;
+        project rows carry no range, so they must also read the same in two
+        consecutive dumps. Live on 2026-10-03 the first dump after Ok already
+        showed the new range (the screen before Ok is the today-only range
+        Custom opens with), so no stale screen was observed either way."""
         self.launch(TIMECAMP, 2)
         self.wait_for("TimeCamp timesheet", lambda ns: any(n["text"] == "Timesheet" for n in ns),
                       timeout_s=FIRST_SCREEN_TIMEOUT_S)
         self.tap(*TIMECAMP_REPORTS_TAB)
-        nodes = self.wait_for("TimeCamp Reports tab ('This Week')",
-                              lambda ns: any(n["text"] == "This Week" for n in ns) and any(", " in n["desc"] for n in ns),
+        nodes = self.wait_for("TimeCamp Reports tab", lambda ns: any(n["text"] == "Custom" for n in ns),
                               retap=TIMECAMP_REPORTS_TAB)
+        self.tap_node(next(n for n in nodes if n["text"] == "Custom"))
+        for index, day in ((0, start), (1, end)):
+            nodes = self.wait_for("TimeCamp date range dialog", lambda ns: len(_range_fields(ns)) == 2)
+            self._pick_date(_range_fields(nodes)[index], day)
+        nodes = self.wait_for(f"TimeCamp range {start.isoformat()}..{end.isoformat()}",
+                              lambda ns: [n["desc"] for n in _range_fields(ns)] == [start.isoformat(), end.isoformat()]
+                              and any(n["desc"] == "Ok" for n in ns))
+        self.tap_node(next(n for n in nodes if n["desc"] == "Ok"))
+        header = report_header(start, end)
+        last: list[dict[str, float] | None] = [None]
+
+        def settled(ns: list[dict]) -> bool:
+            if _range_fields(ns) or not any(n["text"] == header for n in ns):
+                return False
+            if any(n["text"].startswith("Please fill your timesheet") for n in ns):
+                return sum(n["text"] == header for n in ns) >= 2  # the empty state names its own range
+            if not any(n["desc"].startswith("Total time, ") for n in ns):
+                return False
+            hours = parse_timecamp_report([n["desc"] for n in ns if n["desc"]])
+            same, last[0] = hours == last[0], hours
+            return same  # rows name no range: require two identical dumps
+
+        nodes = self.wait_for(f"TimeCamp report for {header}", settled)
         return parse_timecamp_report([n["desc"] for n in nodes if n["desc"]])
+
+    def _pick_date(self, field_node: dict, day: date) -> None:
+        """Open a From/To field's date picker, page to the month, tap the day, OK."""
+        self.tap_node(field_node)
+        label = picker_label(day)
+        nodes = self.wait_for("date picker", lambda ns: any(n["text"] == "OK" for n in ns)
+                              and picker_month([n["desc"] for n in ns]) is not None)
+        for _ in range(MAX_MONTH_STEPS):
+            hit = next((n for n in nodes if n["desc"] == label), None)
+            if hit is not None:
+                break
+            shown = picker_month([n["desc"] for n in nodes])
+            if shown is None:
+                raise DeviceError(f"date picker lost while paging to {label}")
+            arrow = "Previous month" if (day.year, day.month) < shown else "Next month"
+            button = next((n for n in nodes if n["desc"] == arrow), None)
+            if button is None:
+                raise DeviceError(f"date picker has no {arrow!r} button")
+            self.tap_node(button)
+            self._sleep(1)
+            nodes = self.nodes()
+        else:
+            raise DeviceError(f"date picker never showed {label} after {MAX_MONTH_STEPS} pages")
+        self.tap_node(hit)
+        nodes = self.wait_for(f"{label} selected", lambda ns: any(n["desc"] == label and n["checked"] for n in ns))
+        self.tap_node(next(n for n in nodes if n["text"] == "OK"))
 
     def insightly_org_description(self, name: str) -> str | None:
         """Description text of the organisation, '' if empty, None if not found."""
@@ -346,8 +448,10 @@ class BizReadback:
             self.wait_for("Invoice Ninja shell", lambda ns: any(n["desc"] == "Menu Sidebar" for n in ns),
                           timeout_s=FIRST_SCREEN_TIMEOUT_S)
         self.tap(*IN_SIDEBAR)
-        self.wait_for("Invoice Ninja sidebar", lambda ns: any(n["desc"] == "Invoices" for n in ns), retap=IN_SIDEBAR)
-        self.tap(*IN_SIDEBAR_INVOICES)
+        nodes = self.wait_for("Invoice Ninja sidebar", lambda ns: any(n["desc"] == "Invoices" for n in ns), retap=IN_SIDEBAR)
+        # Tap the node, not a fixed point: the sidebar's rows move when the
+        # phone-verification banner comes and goes (seen 2026-10-03).
+        self.tap_node(next(n for n in nodes if n["desc"] == "Invoices"))
         nodes = self.wait_for("Invoice Ninja invoices list", lambda ns: any(n["desc"] == "New Invoice" for n in ns))
         return self._ensure_all_states() if first else nodes
 
@@ -415,6 +519,11 @@ class BizReadback:
         return invoices, False
 
 
+def _range_fields(nodes: list[dict]) -> list[dict]:
+    """The From and To fields of TimeCamp's range dialog (desc 'YYYY-MM-DD'), left to right."""
+    return sorted((n for n in nodes if _ISO_DATE.match(n["desc"])), key=lambda n: n["bounds"][0])
+
+
 class BusinessInspector(Inspector):
     """Inspector for the business profile: the usual device state plus a
     BizState read back from the apps.
@@ -424,12 +533,17 @@ class BusinessInspector(Inspector):
     the fixed source data of the snapshot and the tasks only read them.
     Invoices are re-read every call; detail views are opened only for
     numbers not present in the first read, so the pre-state stays cheap.
+    With `invoice_api` (biz_api.InvoiceNinjaApi, or anything with
+    invoices() -> dict[str, Invoice]) invoices come from the API instead,
+    always with line items; an API failure raises, it never falls back to
+    the screen, so the task's declared tier stays true.
     """
 
     def __init__(self, serial: str, markor_dir: str = DEFAULT_MARKOR_DIR,
-                 readback: BizReadback | None = None) -> None:
+                 readback: BizReadback | None = None, invoice_api: Any = None) -> None:
         super().__init__(serial, markor_dir)
         self.readback = readback or BizReadback(serial)
+        self.invoice_api = invoice_api
         self._sources: tuple[dict[str, float], dict[str, str]] | None = None
         self._first_invoices: set[str] | None = None
 
@@ -445,7 +559,10 @@ class BusinessInspector(Inspector):
                         descs[org] = d
                 self._sources = (hours, descs)
             hours, descs = self._sources
-            invoices, complete = self.readback.invoice_ninja_invoices(known=self._first_invoices)
+            if self.invoice_api is not None:
+                invoices, complete = self.invoice_api.invoices(), True
+            else:
+                invoices, complete = self.readback.invoice_ninja_invoices(known=self._first_invoices)
             if self._first_invoices is None:
                 self._first_invoices = set(invoices)
         finally:

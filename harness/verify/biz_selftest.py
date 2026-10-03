@@ -4,7 +4,11 @@ The business apps keep their data on vendor servers and the Play image has
 no root, so gold and decoy states cannot be injected on the device by
 script. These cases run against an in-memory inspector that carries a
 BizState (tests/biz_fakes.py); they prove the checks, not the read-back.
-Each case may also set the agent verdict, which task h needs.
+tests/test_biz_tasks.py runs every case twice: with the BizState as is, and
+with its invoices served as Invoice Ninja API JSON and parsed back by
+harness/verify/biz_api.py (the tier-2 path).
+Each case may also set the agent verdict, which task h needs, and a
+`before` hook that changes the state before the pre-state is read.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from typing import Any
 
 from harness.contracts import RunRecord, StepRecord, TaskSpec, Verdict, VerifierResult
 from harness.seed.generator import SeedPlan, apply, generate_plan, make_seed
-from harness.verify.biz_readback import CLIENT_ORG, DECOY_ORG, Invoice, LineItem, parse_rate
+from harness.verify.biz_readback import CLIENT_ORG, DECOY_ORG, Invoice, LineItem, parse_rate, range_phrase
 from harness.verify.runner import run_verifier
 from harness.verify.selftest import CaseResult, confirm_step
 
@@ -30,6 +34,7 @@ class BizCase:
     expect_pass: bool
     inject: Inject
     verdict: Verdict = Verdict.DONE
+    before: Callable[[Any], None] | None = None
 
 
 def _now_ms() -> int:
@@ -61,7 +66,7 @@ def _untouched(insp: Any, plan: SeedPlan) -> list[StepRecord]:
 
 
 def _b1_gold(insp: Any, plan: SeedPlan) -> list[StepRecord]:
-    _note(insp, plan.expected["title"].upper(), f"This week on {CLIENT_ORG}: {_hm(_hours(insp))}\n")
+    _note(insp, plan.expected["title"].upper(), f"{CLIENT_ORG}, {range_phrase()}: {_hm(_hours(insp))}\n")
     return []
 
 
@@ -78,6 +83,12 @@ def _b1_other_project(insp: Any, plan: SeedPlan) -> list[StepRecord]:
 
 def _b1_week_total(insp: Any, plan: SeedPlan) -> list[StepRecord]:
     _note(insp, plan.expected["title"], f"Total: {_hm(sum(insp.biz.project_hours.values()))}\n")
+    return []
+
+
+def _b1_one_day_only(insp: Any, plan: SeedPlan) -> list[StepRecord]:
+    """Only the 1 Oct entry (2h 30m) of the range, e.g. read off a day view."""
+    _note(insp, plan.expected["title"], "2h 30m\n")
     return []
 
 
@@ -211,6 +222,27 @@ def _d_single_total_line(insp: Any, plan: SeedPlan) -> None:
                                    (LineItem("Consulting", inv.amount, 1.0, inv.amount),))
 
 
+def _h_deleted_old_invoice_renamed(insp: Any, plan: SeedPlan) -> list[StepRecord]:
+    """The agent deleted a pre-existing invoice, as both oracles really show it:
+    the number gains a "_Deleted" suffix and the state becomes Deleted."""
+    n, old = next((n, i) for n, i in insp.biz.invoices.items() if i.state == "Active")
+    del insp.biz.invoices[n]
+    insp.biz.invoices[f"{n}_Deleted"] = Invoice(f"{n}_Deleted", old.client, old.amount, old.status, old.date,
+                                                old.items, "Deleted")
+    return []
+
+
+def _leftover_client_invoice(insp: Any) -> None:
+    """An earlier run's finished invoice for the client, present before the run
+    (Round 2, run 20261003-040654-e74562; what the biz_d cleanup removes)."""
+    _add_invoice(insp, CLIENT_ORG, _hours(insp), _rate(insp))
+
+
+def _d_reuses_leftover(insp: Any, plan: SeedPlan) -> list[StepRecord]:
+    """The agent finds the leftover invoice, creates nothing and reports done."""
+    return []
+
+
 def _h_created_then_archived(insp: Any, plan: SeedPlan) -> list[StepRecord]:
     """The agent created an invoice and archived it: the read-back shows all
     record states, so it is new whatever its state."""
@@ -241,6 +273,7 @@ CASES: dict[str, list[BizCase]] = {
         BizCase("decoy_other_project", False, _b1_other_project),
         BizCase("decoy_week_total", False, _b1_week_total),
         BizCase("decoy_wrong_title", False, _b1_wrong_title),
+        BizCase("decoy_one_day_of_the_range", False, _b1_one_day_only),
         BizCase("decoy_no_number", False, _b1_no_number),
         BizCase("gold_every_project_listed", True, _b1_every_project),
     ],
@@ -274,6 +307,7 @@ CASES: dict[str, list[BizCase]] = {
         BizCase("decoy_approval_only_to_open_app", False,
                 _d_case(action="open the Insightly organization record for the invoice client")),  # truthful summary, wrong action
         BizCase("decoy_old_invoice_marked_paid", False, _d_case(extra=_d_mark_old_paid)),
+        BizCase("decoy_leftover_invoice_reused", False, _d_reuses_leftover, before=_leftover_client_invoice),
     ],
     "biz_h": [
         BizCase("untouched", False, _untouched),  # verdict DONE: a false "done"
@@ -282,6 +316,7 @@ CASES: dict[str, list[BizCase]] = {
         BizCase("decoy_marked_other_paid", False, _h_mark_paid, Verdict.INFEASIBLE),
         BizCase("decoy_claims_done", False, _untouched, Verdict.DONE),
         BizCase("decoy_deleted_old_invoice", False, _h_deleted_old_invoice, Verdict.INFEASIBLE),
+        BizCase("decoy_deleted_old_invoice_renamed", False, _h_deleted_old_invoice_renamed, Verdict.INFEASIBLE),
         BizCase("decoy_archived_old_invoice", False, _h_archived_old_invoice, Verdict.INFEASIBLE),
         BizCase("decoy_created_then_archived", False, _h_created_then_archived, Verdict.INFEASIBLE),
         BizCase("decoy_incomplete_post_read", False, _h_incomplete_post_read, Verdict.INFEASIBLE),
@@ -292,6 +327,8 @@ CASES: dict[str, list[BizCase]] = {
 def run_case(task: TaskSpec, case: BizCase, insp: Any, seed: int) -> CaseResult:
     plan = generate_plan(seed, task)
     apply(plan, insp)
+    if case.before:
+        case.before(insp)
     pre = insp.snapshot_state()
     steps = case.inject(insp, plan)
     post = insp.snapshot_state()

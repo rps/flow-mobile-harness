@@ -73,11 +73,12 @@ def test_run_scored_never_passes_a_goal_and_pins_baseline(monkeypatch):
         device_factory = inspector_factory = emulator = object()
 
     monkeypatch.setattr("harness.runner.run_task", fake_run_task)
-    monkeypatch.setattr(business, "env", lambda config, windowed=True: FakeEnv())
+    monkeypatch.setattr(business, "env", lambda config, windowed=True, invoice_api=None: FakeEnv())
     out = business.run_scored("biz_h", object(), "approve", store="store", goal="sneaky", meta={"k": 1})
     assert out == "record"
     assert seen["goal"] is None and seen["baseline_json"] == business.BASELINE_JSON
-    assert seen["meta"] == {"k": 1, "profile": "business"}
+    assert seen["meta"] == {"k": 1, "profile": "business", "oracle": business.oracle_meta(None)}
+    assert seen["meta"]["oracle"]["invoices"] == "invoice_ninja_screen_readback" and seen["meta"]["oracle"]["invoices_tier"] == 5
     assert tuple(seen["block_packages"]) == ("com.android.vending",)
 
 
@@ -88,7 +89,7 @@ def test_run_scored_keeps_caller_block_packages_alongside_play_store(monkeypatch
         device_factory = inspector_factory = emulator = object()
 
     monkeypatch.setattr("harness.runner.run_task", lambda task_id, goal, config, policy, **kw: seen.update(kw))
-    monkeypatch.setattr(business, "env", lambda config, windowed=True: FakeEnv())
+    monkeypatch.setattr(business, "env", lambda config, windowed=True, invoice_api=None: FakeEnv())
     business.run_scored("biz_h", object(), "approve", store="store", block_packages=["org.example.x"])
     assert sorted(seen["block_packages"]) == ["com.android.vending", "org.example.x"]
 
@@ -120,3 +121,196 @@ def test_env_prefix_names_every_override():
                                    "LABS_SYSTEM_IMAGE='system-images;android-36.1;google_apis_playstore;arm64-v8a'")
     import shlex
     assert dict(kv.split("=", 1) for kv in shlex.split(business.ENV_PREFIX)) == business.ENV
+
+
+# --- Invoice oracle and the biz_d cleanup -----------------------------------------
+
+from harness.contracts import OracleTier  # noqa: E402
+from harness.verify import biz_api  # noqa: E402
+from tests.biz_fakes import API_ROOT, FakeInvoiceServer  # noqa: E402
+
+
+def _server():
+    return FakeInvoiceServer(
+        [{"id": "nw", "name": "Northwind Traders"}, {"id": "zz", "name": "ZZ Probe Test Client"}],
+        [{"id": "a", "number": "0001_Deleted", "client_id": "nw", "amount": 403.75, "status_id": "1",
+          "is_deleted": True, "archived_at": 1, "line_items": []},
+         {"id": "b", "number": "0002", "client_id": "nw", "amount": 403.75, "status_id": "1",
+          "is_deleted": False, "archived_at": None, "line_items": []},
+         {"id": "c", "number": "0003", "client_id": "zz", "amount": 120.0, "status_id": "2",
+          "is_deleted": False, "archived_at": None, "line_items": []}])
+
+
+class _Captured:
+    """Stands in for runner.run_task and records what run_scored passed."""
+
+    def __init__(self):
+        self.kw = {}
+
+    def __call__(self, task_id, goal, config, policy, **kw):
+        self.kw = dict(kw, task_id=task_id)
+        return "record"
+
+
+def _with_api(monkeypatch, server, tier_of=("biz_d_invoice", "biz_h")):
+    """API configured: from_env returns a client on the fake server, the
+    environment says tier 2 and the invoice tasks declare it."""
+    from harness.tasks import registry
+
+    api = biz_api.InvoiceNinjaApi(API_ROOT, "tok", opener=server)
+    monkeypatch.setattr(biz_api, "from_env", lambda environ=None: api)
+    monkeypatch.setenv(biz_api.ENV_KEY, "tok")
+    monkeypatch.setenv(biz_api.ENV_ENDPOINT, API_ROOT)
+    for tid in tier_of:
+        monkeypatch.setattr(registry.get(tid), "oracle_tier", OracleTier.APP_EXPORT_API)
+    return api
+
+
+def _fake_env(monkeypatch, built):
+    class FakeEnv:
+        device_factory = emulator = object()
+
+        @staticmethod
+        def inspector_factory():
+            built.append("inspector")
+            return "inspector"
+
+    def env(config, windowed=True, invoice_api=None):
+        built.append(("env", invoice_api))
+        return FakeEnv()
+
+    monkeypatch.setattr(business, "env", env)
+
+
+def test_run_scored_with_the_api_cleans_up_only_when_the_runner_builds_the_inspector(monkeypatch):
+    server, built, cap = _server(), [], _Captured()
+    api = _with_api(monkeypatch, server)
+    _fake_env(monkeypatch, built)
+    monkeypatch.setattr("harness.runner.run_task", cap)
+    business.run_scored("biz_d_invoice", object(), "approve", store="s")
+    meta = cap.kw["meta"]
+    assert meta["oracle"]["invoices"] == "invoice_ninja_api" and meta["oracle"]["invoices_tier"] == 2
+    assert meta["oracle"]["hours_range"] == "2026-09-28..2026-10-03"
+    assert built == [("env", api)]  # the inspector is paired with the same API client
+    assert meta["invoice_cleanup"] == {"status": "pending"}
+    assert "com.android.vending" in cap.kw["block_packages"]  # Play Store block kept alongside the cleanup
+    assert not [r for r in server.requests if r[0] == "DELETE"]  # nothing deleted before the runner asks
+    assert cap.kw["inspector_factory"]() == "inspector"
+    assert [p for m, p, _, _ in server.requests if m == "DELETE"] == ["/api/v1/invoices/b"]
+    assert meta["invoice_cleanup"]["status"] == "done"
+    assert [r["number"] for r in meta["invoice_cleanup"]["removed"]] == ["0002"]
+    assert next(r for r in server.invoices if r["id"] == "c")["number"] == "0003"  # other client untouched
+
+
+def test_run_scored_cleanup_failure_is_recorded_and_stops_the_inspector(monkeypatch):
+    server, built, cap = _server(), [], _Captured()
+    server.fail["/api/v1/invoices/b"] = 500
+    _with_api(monkeypatch, server)
+    _fake_env(monkeypatch, built)
+    monkeypatch.setattr("harness.runner.run_task", cap)
+    business.run_scored("biz_d_invoice", object(), "approve", store="s")
+    with pytest.raises(biz_api.InvoiceNinjaError, match="HTTP 500"):
+        cap.kw["inspector_factory"]()
+    assert cap.kw["meta"]["invoice_cleanup"]["status"].startswith("failed: InvoiceNinjaError")
+    assert "inspector" not in built
+
+
+def test_run_scored_without_the_api_skips_cleanup_and_biz_h_never_cleans(monkeypatch):
+    built, cap = [], _Captured()
+    monkeypatch.delenv(biz_api.ENV_KEY, raising=False)
+    monkeypatch.delenv(biz_api.ENV_ENDPOINT, raising=False)
+    _fake_env(monkeypatch, built)
+    monkeypatch.setattr("harness.runner.run_task", cap)
+    business.run_scored("biz_d_invoice", object(), "approve", store="s")
+    assert cap.kw["meta"]["invoice_cleanup"] == {"status": "skipped: invoice API not configured"}
+    cap.kw["inspector_factory"]()
+    assert cap.kw["meta"]["invoice_cleanup"] == {"status": "skipped: invoice API not configured"}
+
+    server = _server()
+    _with_api(monkeypatch, server)
+    business.run_scored("biz_h", object(), "approve", store="s")
+    cap.kw["inspector_factory"]()
+    assert "invoice_cleanup" not in cap.kw["meta"] and not [r for r in server.requests if r[0] == "DELETE"]
+
+
+def test_run_scored_refuses_tier_5_task_when_the_environment_selects_the_api(monkeypatch):
+    built, cap = [], _Captured()
+    _fake_env(monkeypatch, built)
+    monkeypatch.setattr("harness.runner.run_task", cap)
+    server = _server()
+    _with_api(monkeypatch, server, tier_of=())  # API configured, tasks still declare tier 5
+    with pytest.raises(ProfileError, match="declares oracle tier 5 but the environment selects tier 2"):
+        business.run_scored("biz_h", object(), "approve", store="s")
+    assert cap.kw == {} and built == [] and server.requests == []
+
+
+def test_run_scored_refuses_tier_2_task_when_the_api_is_not_configured(monkeypatch):
+    from harness.tasks import registry
+
+    built, cap = [], _Captured()
+    _fake_env(monkeypatch, built)
+    monkeypatch.setattr("harness.runner.run_task", cap)
+    monkeypatch.delenv(biz_api.ENV_KEY, raising=False)
+    monkeypatch.setenv(biz_api.ENV_ENDPOINT, API_ROOT)
+    monkeypatch.setattr(registry.get("biz_d_invoice"), "oracle_tier", OracleTier.APP_EXPORT_API)
+    with pytest.raises(ProfileError, match="declares oracle tier 2 but the environment selects tier 5"):
+        business.run_scored("biz_d_invoice", object(), "approve", store="s")
+    assert cap.kw == {} and built == []
+
+
+def test_cleanup_reaches_run_json_through_the_real_runner(monkeypatch, tmp_path):
+    """run_task copies meta shallowly; the cleanup record placed in it by
+    run_scored must be the dict that run.json ends up holding."""
+    from harness.contracts import Config
+    from harness.fake_env import FAKE_MODEL, ScriptedClient
+    from harness.agent.loop import AgentSettings
+    from harness.trace.store import TraceStore
+    from tests.agent_fakes import FakeDevice
+    from tests.biz_fakes import FakeBizInspector
+
+    server = _server()
+    _with_api(monkeypatch, server)
+    order = []
+
+    class Emu:
+        SERIAL = "test-biz"
+
+        def restore_snapshot(self, name):
+            order.append("restore")
+
+    class Insp(FakeBizInspector):
+        def snapshot_state(self):
+            order.append("snapshot")
+            return super().snapshot_state()
+
+    class FakeEnv:
+        emulator = Emu()
+        device_factory = FakeDevice
+
+        @staticmethod
+        def inspector_factory():
+            order.append(("deleted", [p for m, p, _, _ in server.requests if m == "DELETE"]))
+            return Insp()
+
+    monkeypatch.setattr(business, "env", lambda config, windowed=True, invoice_api=None: FakeEnv())
+    store = TraceStore(tmp_path / "runs")
+    config = Config(model=FAKE_MODEL, runs_dir=str(store.runs_dir))
+    run = business.run_scored("biz_d_invoice", config, "approve", store, model_client=ScriptedClient(),
+                              settings=AgentSettings(allow_unpriced=True))
+    on_disk, _ = store.load_run(run.run_id)
+    assert on_disk.meta["invoice_cleanup"]["status"] == "done", on_disk.meta
+    assert [r["number"] for r in on_disk.meta["invoice_cleanup"]["removed"]] == ["0002"]
+    assert on_disk.meta["oracle"]["invoices"] == "invoice_ninja_api"
+    assert on_disk.verifier_result is not None and on_disk.verifier_result.oracle_tier == OracleTier.APP_EXPORT_API
+    assert order[:3] == ["restore", ("deleted", ["/api/v1/invoices/b"]), "snapshot"]  # after restore, before pre-state
+
+
+def test_cleanup_invoices_needs_the_api_and_the_cli_prints_the_result(monkeypatch, capsys):
+    monkeypatch.setattr(biz_api, "from_env", lambda environ=None: None)
+    with pytest.raises(ProfileError, match="INVOICE_NINJA_API_KEY"):
+        business.cleanup_invoices()
+    server = _server()
+    _with_api(monkeypatch, server)
+    business.main(["cleanup-invoices"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["client"] == "Northwind Traders" and [r["number_after"] for r in out["removed"]] == ["0002_Deleted"]
