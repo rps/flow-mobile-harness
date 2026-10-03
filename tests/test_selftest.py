@@ -7,8 +7,11 @@ from harness.verify.runner import run_verifier
 from harness.verify.selftest import CASES, confirm_step, format_result, run_case, run_selftest
 from tests.fakes import FakeInspector
 
+# Business tasks have their own cases and fake (tests/test_biz_tasks.py).
+DEVICE_TASKS = [t for t in all_tasks() if t.id in CASES]
 
-@pytest.mark.parametrize("task", all_tasks(), ids=lambda t: t.id)
+
+@pytest.mark.parametrize("task", DEVICE_TASKS, ids=lambda t: t.id)
 @pytest.mark.parametrize("seed", [1, 2, 3, 4242, 2**31 + 7])
 def test_every_selftest_case_behaves(task, seed):
     results = run_selftest(task, FakeInspector(), seed)
@@ -17,7 +20,7 @@ def test_every_selftest_case_behaves(task, seed):
     assert not bad, "\n".join(bad)
 
 
-@pytest.mark.parametrize("task", all_tasks(), ids=lambda t: t.id)
+@pytest.mark.parametrize("task", DEVICE_TASKS, ids=lambda t: t.id)
 def test_each_task_has_untouched_gold_and_a_decoy(task):
     names = [c.name for c in CASES[task.id]]
     assert names[:2] == ["untouched", "gold"]
@@ -32,7 +35,7 @@ def test_f_selftest_holds_under_device_clock_skew(offset_ms):
 
 
 def test_selftest_without_calendar_provider_still_behaves():
-    for task in all_tasks():
+    for task in DEVICE_TASKS:
         assert all(r.ok for r in run_selftest(task, FakeInspector(calendar=False), 9))
 
 
@@ -48,7 +51,7 @@ def test_case_cleanup_restores_device_to_baseline():
     before = fake.snapshot_state()
     task = get("a_markor_note")
     run_case(task, next(c for c in CASES[task.id] if c.name == "decoy_edited_seed_note"), fake, 8)
-    for t in all_tasks():
+    for t in DEVICE_TASKS:
         run_selftest(t, fake, 8)
     after = fake.snapshot_state()
     assert after.files == before.files and after.contacts == before.contacts and after.sms == before.sms

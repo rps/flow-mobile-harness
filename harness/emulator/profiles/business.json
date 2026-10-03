@@ -1,0 +1,43 @@
+{
+  "avd": "p2_business_play",
+  "serial": "emulator-5592",
+  "snapshot": "business",
+  "system_image": "system-images;android-36.1;google_apis_playstore;arm64-v8a",
+  "created_at": "2026-10-03T01:04:22+00:00",
+  "hvf": true,
+  "root": false,
+  "host_loopback_blocked": false,
+  "host_loopback_reachable": true,
+  "freeform_allowed": false,
+  "google_account_present": true,
+  "apps": {
+    "timecamp": {
+      "package": "com.timecamp.mobile",
+      "primaryCpuAbi": "arm64-v8a",
+      "versionName": "3.13.0",
+      "installerPackageName": "com.android.vending"
+    },
+    "insightly": {
+      "package": "com.insightly.droid",
+      "primaryCpuAbi": "arm64-v8a",
+      "versionName": "5.0.2",
+      "installerPackageName": "com.android.vending"
+    },
+    "invoice_ninja": {
+      "package": "com.invoiceninja.app",
+      "primaryCpuAbi": "arm64-v8a",
+      "versionName": "5.0.193",
+      "installerPackageName": "com.android.vending"
+    },
+    "markor": {
+      "package": "net.gsantner.markor",
+      "primaryCpuAbi": "null",
+      "versionName": "2.16.1",
+      "installerPackageName": "null"
+    }
+  },
+  "markor_notebook_dir": "/storage/emulated/0/Documents/markor",
+  "snapshots": [
+    "business"
+  ]
+}

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from harness.contracts import TaskSpec
-from harness.tasks import a_markor_note, b_contact_to_note, f_send_sms
+from harness.tasks import (
+    a_markor_note, b_contact_to_note, biz_b1_hours, biz_b2_rate, biz_d_invoice, biz_h, f_send_sms,
+)
 
 _TASKS: dict[str, TaskSpec] = {
-    t.id: t for t in (a_markor_note.TASK, b_contact_to_note.TASK, f_send_sms.TASK)
+    t.id: t for t in (a_markor_note.TASK, b_contact_to_note.TASK, f_send_sms.TASK,
+                      biz_b1_hours.TASK, biz_b2_rate.TASK, biz_d_invoice.TASK, biz_h.TASK)
 }
 
 
