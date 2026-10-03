@@ -37,6 +37,7 @@ Records with `to_dict()` / `from_dict()` survive a JSON round trip; enums serial
 
 - `CheckResult(name: str, passed: bool, detail: str = "")`, with `to_dict` / `from_dict`
 - `VerifierResult(passed: bool, oracle_tier: OracleTier, end_state: list[CheckResult] = [], side_effects: list[CheckResult] = [], process: list[CheckResult] = [], self_report_agrees: bool | None = None)`, with `to_dict` / `from_dict`
+  - `self_report_agrees`: `(agent_verdict == expected_verdict(task)) == passed`, where the expected verdict is `INFEASIBLE` for a flow-H (infeasible goal) task and `DONE` otherwise; `None` when the agent gave no verdict. An agent that correctly reports an infeasible goal and leaves the device unchanged therefore agrees. The verdict never affects `passed`.
 
 ## Trace
 

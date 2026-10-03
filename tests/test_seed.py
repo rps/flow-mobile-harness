@@ -81,3 +81,18 @@ def test_apply_never_writes_expected_only_values_or_seed():
         for k in keys:
             assert plan.expected[k] not in on_device, (task.id, k)
         assert str(plan.seed) not in on_device
+
+
+def test_apply_runs_extras_last_against_the_target():
+    class Extra:
+        def __init__(self):
+            self.seen = []
+
+        def apply(self, target):
+            self.seen.append((target, len(target.contacts_db), len(target.files_db)))
+
+    fake, extra = FakeInspector(), Extra()
+    plan = generate_plan(11)
+    plan.extras.append(extra)
+    apply(plan, fake)
+    assert extra.seen == [(fake, len(plan.contacts), len(plan.notes))]

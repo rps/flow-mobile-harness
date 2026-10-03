@@ -1,5 +1,6 @@
 import io
 import json
+import time
 
 import pytest
 
@@ -389,3 +390,341 @@ def test_run_record_meta_round_trips_and_defaults():
     old = r.to_dict()
     del old["meta"]
     assert RunRecord.from_dict(old).meta == {}
+
+
+# --- restore retry, blocked packages, cancel -----------------------------------
+
+
+class ColdBootRecorder(Recorder):
+    """Emulator that can stop() and start(); restore fails `restore_failures` times."""
+
+    def __init__(self, runs_dir, restore_failures=1):
+        super().__init__(runs_dir)
+        self.restore_failures = restore_failures
+
+    def restore_snapshot(self, name):
+        self.restores.append(name)
+        self.mark("restore")
+        if self.restore_failures:
+            self.restore_failures -= 1
+            raise DeviceError("snapshot load: KO")
+        return 0.0
+
+    def stop(self):
+        self.mark("stop")
+
+    def start(self, windowed=False):
+        self.mark(f"start windowed={windowed}")
+        return 12.34
+
+
+def test_failed_restore_is_retried_once_after_cold_boot(tmp_path, monkeypatch):
+    rec = ColdBootRecorder(tmp_path / "runs")
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+    run = _run(rec, windowed=True)
+    assert rec.log[:4] == ["restore", "stop", "start windowed=True", "restore"]
+    assert run.termination_reason is TerminationReason.FINISHED
+    assert run.meta["restore_retry"] == {"error": "DeviceError: snapshot load: KO", "boot_s": 12.3, "ok": True}
+
+
+def test_restore_retry_is_capped_at_one(tmp_path, monkeypatch):
+    rec = ColdBootRecorder(tmp_path / "runs", restore_failures=2)
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+    run = _run(rec)  # default: no window, like manager.start
+    assert rec.log == ["restore", "stop", "start windowed=False", "restore", "start_run", "finish"]
+    assert run.termination_reason is TerminationReason.ERROR
+    assert run.meta["error"] == "restore: DeviceError: snapshot load: KO"
+    assert run.meta["restore_retry"] == {"error": "DeviceError: snapshot load: KO", "boot_s": 12.3}
+
+
+def test_emulator_without_cold_boot_fails_on_first_restore_error(rec):
+    rec.fail = {"restore": DeviceError("KO")}
+    run = _run(rec)
+    assert run.meta["error"] == "restore: DeviceError: KO" and "restore_retry" not in run.meta
+
+
+CHROME = [("open_app", {"package": "com.android.chrome"}), ("open_app", {"package": "net.gsantner.markor"}),
+          ("finish", {"verdict": "done", "summary": "done"})]
+
+
+def test_chrome_is_blocked_for_scored_tasks_even_if_allowed(rec):
+    run = _run(rec, client=ScriptedClient(CHROME), allow_packages=["com.android.chrome"])
+    assert run.meta["blocked_packages"] == ["com.android.chrome"]
+    assert run.meta["chrome_disabled"] is True
+    assert rec.inspector.shell_calls == [["pm", "disable-user", "--user", "0", "com.android.chrome"]]
+    assert rec.log.index("restore") < rec.log.index("seed_write")  # disabled after restore, before seeding
+    assert [c for c in rec.devices[0].calls if c[0] == "open_app"] == [("open_app", "net.gsantner.markor")]
+    _, steps = _on_disk(rec, run)
+    assert steps[0].tool_result == {"error": "open_app failed: com.android.chrome is not allowed in this run"}
+    assert run.termination_reason is TerminationReason.FINISHED
+
+
+def test_freeform_may_allow_chrome(rec, tmp_path):
+    bj = tmp_path / "baseline.json"
+    bj.write_text(json.dumps({"host_loopback_blocked": True}))
+    run = _run(rec, task_id=None, goal="browse", client=ScriptedClient(CHROME), baseline_json=bj,
+               allow_packages=["com.android.chrome"])
+    assert run.meta["blocked_packages"] == [] and run.meta["chrome_disabled"] is False
+    assert rec.inspector.shell_calls == [["pm", "enable", "com.android.chrome"]]
+    assert rec.devices[0].calls[0] == ("open_app", "com.android.chrome")
+    blocked = _run(rec, task_id=None, goal="browse", client=ScriptedClient(CHROME), baseline_json=bj)
+    assert blocked.meta["blocked_packages"] == ["com.android.chrome"] and blocked.meta["chrome_disabled"] is True
+    assert rec.devices[1].calls[0] == ("open_app", "net.gsantner.markor")
+
+
+def test_chrome_disable_failure_fails_the_scored_run_closed(rec):
+    def failing_shell(argv, timeout=30.0):
+        raise DeviceError("pm: permission denied")
+
+    rec.inspector.shell = failing_shell
+    run = _run(rec)
+    assert run.meta["chrome_disabled"] == "DeviceError: pm: permission denied"
+    assert run.termination_reason is TerminationReason.ERROR
+    assert run.meta["error"].startswith("seed: DeviceError: cannot disable com.android.chrome")
+    assert "agent_start" not in rec.log and "verify" not in rec.log and run.verifier_result is None
+
+
+def test_chrome_enable_failure_on_freeform_only_warns(rec, tmp_path):
+    def failing_shell(argv, timeout=30.0):
+        raise DeviceError("pm: permission denied")
+
+    rec.inspector.shell = failing_shell
+    bj = tmp_path / "baseline.json"
+    bj.write_text(json.dumps({"host_loopback_blocked": True}))
+    run = _run(rec, task_id=None, goal="browse", baseline_json=bj, allow_packages=["com.android.chrome"])
+    assert run.meta["chrome_disabled"] == "DeviceError: pm: permission denied"
+    assert run.termination_reason is TerminationReason.FINISHED
+
+
+def test_inspector_without_shell_fails_scored_run_unless_fake(rec):
+    rec.inspector.shell = None
+    run = _run(rec)
+    assert run.meta["chrome_disabled"] == "unsupported: inspector has no shell"
+    assert run.termination_reason is TerminationReason.ERROR and "no shell" in run.meta["error"]
+    fake_run = _run(rec, meta={"fake": True})
+    assert fake_run.meta["chrome_disabled"] == "unsupported: inspector has no shell"
+    assert fake_run.termination_reason is TerminationReason.FINISHED
+
+
+class CancellingClient(ScriptedClient):
+    """Cancels the run (as the web UI would, from another thread) on its 2nd call."""
+
+    def __init__(self, key):
+        super().__init__([("tap", {"x": 1, "y": 1})])
+        self.key = key
+        self.results = []
+
+    def create(self, **kw):
+        if self.calls == 1:
+            self.results.append(runner.request_cancel(self.key))
+        return super().create(**kw)
+
+
+def test_cancel_during_agent_stops_at_next_device_call_and_restores(rec):
+    client = CancellingClient("job-7")
+    run = _run(rec, client=client, meta={"job_id": "job-7"})
+    assert client.results == [True]
+    assert client.calls == 2  # no third model call after the cancel
+    assert run.termination_reason is TerminationReason.ERROR
+    assert run.meta["error"] == "agent: RunCancelled: run cancelled by request"
+    assert run.meta["cancelled"] is True and run.meta["restored_after_cancel"] is True
+    assert rec.restores == ["baseline", "baseline"]
+    assert "verify" not in rec.log and rec.devices[0].calls == [("tap", 1, 1)]
+    stored, steps = _on_disk(rec, run)
+    assert stored.termination_reason is TerminationReason.ERROR and len(steps) == 1
+    assert run.meta["usage_note"].startswith("cancelled mid-turn")
+    assert runner.request_cancel("job-7") is False  # nothing active afterwards
+
+
+def test_cancel_before_agent_skips_restore_seed_and_agent(rec):
+    class CancelOnLock:
+        def __enter__(self):
+            assert runner.request_cancel("job-8") is True
+
+        def __exit__(self, *a):
+            return False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(runner, "serial_lock", lambda *a, **kw: CancelOnLock())
+        run = _run(rec, meta={"job_id": "job-8"})
+    assert run.meta["error"] == "restore: RunCancelled: run cancelled by request"
+    assert run.meta["cancelled"] is True and "restored_after_cancel" not in run.meta
+    assert "agent_start" not in rec.log and "seed_write" not in rec.log
+    assert rec.restores == []  # device never touched, so nothing to put back
+    assert rec.store.list_runs()  # but the cancelled run is on disk
+
+
+def test_request_cancel_unknown_key_is_false():
+    assert runner.request_cancel("no-such-job") is False
+
+
+def test_cold_boot_failure_during_retry_is_recorded(tmp_path, monkeypatch):
+    class BootFails(ColdBootRecorder):
+        def start(self, windowed=False):
+            raise DeviceError("emulator exited with 1")
+
+    rec = BootFails(tmp_path / "runs")
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+    run = _run(rec)
+    assert run.meta["error"] == "restore: DeviceError: emulator exited with 1"
+    assert run.meta["restore_retry"] == {"error": "DeviceError: snapshot load: KO"}
+    assert "agent_start" not in rec.log
+
+
+def test_restore_failure_after_cancel_is_recorded_as_string(rec):
+    class CancelThenBreak(ScriptedClient):
+        def create(self, **kw):
+            runner.request_cancel("job-10")
+            rec.fail = {"restore": DeviceError("KO after cancel")}
+            return super().create(**kw)
+
+    run = _run(rec, client=CancelThenBreak([("tap", {"x": 1, "y": 1})]), meta={"job_id": "job-10"})
+    assert run.meta["cancelled"] is True
+    assert run.meta["restored_after_cancel"] == "DeviceError: KO after cancel"  # no stop/start: no retry
+    assert run.termination_reason is TerminationReason.ERROR
+
+
+def test_cancel_during_seeding_ends_before_the_agent(rec):
+    original = rec.inspector.insert_contact
+
+    def cancelling_insert(*a, **kw):
+        runner.request_cancel("job-9")
+        return original(*a, **kw)
+
+    rec.inspector.insert_contact = cancelling_insert
+    run = _run(rec, meta={"job_id": "job-9"})
+    assert run.meta["error"] == "pre_state: RunCancelled: run cancelled by request"
+    assert run.meta["cancelled"] is True and run.meta["restored_after_cancel"] is True
+    assert rec.devices == [] and "snapshot" not in rec.log and "verify" not in rec.log
+    assert rec.restores == ["baseline", "baseline"]
+
+
+def test_cancel_by_run_id(rec):
+    class CancelByRunId(ScriptedClient):
+        def create(self, **kw):
+            (run_id,) = rec.store.list_runs()
+            assert runner.request_cancel(run_id) is True
+            return super().create(**kw)
+
+    run = _run(rec, client=CancelByRunId([("tap", {"x": 1, "y": 1})]))
+    assert run.meta["cancelled"] is True and rec.devices[0].calls == []
+
+
+def test_cancel_while_queued_for_the_lock_returns_without_waiting(rec):
+    import threading
+
+    results = []
+    with serial_lock(rec.store.runs_dir, rec.SERIAL):
+        t = threading.Thread(target=lambda: results.append(_run(rec, meta={"job_id": "job-q"})))
+        t.start()
+        deadline = time.monotonic() + 5
+        while not runner.request_cancel("job-q") and time.monotonic() < deadline:
+            time.sleep(0.01)
+        t.join(5)  # returns while the lock is still held
+        assert not t.is_alive()
+    (run,) = results
+    assert run.meta["cancelled"] is True and run.meta["error"].startswith("restore: RunCancelled")
+    assert rec.restores == [] and rec.devices == []
+
+
+def test_serial_lock_cancel_callback(tmp_path):
+    with serial_lock(tmp_path, "a"):
+        with pytest.raises(runner.RunCancelled):
+            with serial_lock(tmp_path, "a", cancelled=lambda: True):
+                pass
+        with pytest.raises(RunnerBusy):
+            with serial_lock(tmp_path, "a", timeout_s=0, cancelled=lambda: False):
+                pass
+
+
+def test_cancel_after_the_agent_finished_has_no_effect(rec):
+    class CancelInVerify:
+        def __init__(self):
+            self.result = None
+
+    probe = CancelInVerify()
+    real_verifier = runner.run_verifier
+
+    def verifier(*a, **kw):
+        probe.result = runner.request_cancel("job-v")
+        return real_verifier(*a, **kw)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(runner, "run_verifier", verifier)
+        run = _run(rec, meta={"job_id": "job-v"})
+    assert probe.result is False
+    assert "cancelled" not in run.meta and run.termination_reason is TerminationReason.FINISHED
+    assert run.meta["cancel_requested_late"] is True
+    stored, _ = _on_disk(rec, run)
+    assert stored.meta["cancel_requested_late"] is True
+
+
+def test_restore_after_cancel_uses_the_cold_boot_retry(tmp_path, monkeypatch):
+    rec = ColdBootRecorder(tmp_path / "runs", restore_failures=0)
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+
+    class CancelThenBreak(ScriptedClient):
+        def create(self, **kw):
+            runner.request_cancel("job-11")
+            rec.restore_failures = 1  # the post-cancel restore fails once
+            return super().create(**kw)
+
+    run = _run(rec, client=CancelThenBreak([("tap", {"x": 1, "y": 1})]), meta={"job_id": "job-11"})
+    assert run.meta["cancelled"] is True and run.meta["restored_after_cancel"] is True
+    assert run.meta["restore_retry"]["ok"] is True
+    assert rec.log[-4:] == ["stop", "start windowed=False", "restore", "finish"]
+
+
+class LoopbackRecorder(ColdBootRecorder):
+    def __init__(self, runs_dir, reachable):
+        super().__init__(runs_dir, restore_failures=1)
+        self.reachable = reachable
+        self.probes = 0
+
+    def loopback_reachable(self):
+        self.probes += 1
+        return self.reachable
+
+
+@pytest.mark.parametrize("reachable", [True, False])
+def test_freeform_rechecks_loopback_after_a_cold_boot(tmp_path, monkeypatch, reachable):
+    rec = LoopbackRecorder(tmp_path / "runs", reachable)
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+    bj = tmp_path / "baseline.json"
+    bj.write_text(json.dumps({"host_loopback_blocked": True}))
+    run = _run(rec, task_id=None, goal="browse", baseline_json=bj)
+    assert rec.probes == 1 and run.meta["restore_retry"]["ok"] is True
+    if reachable:
+        assert run.termination_reason is TerminationReason.ERROR
+        assert run.meta["host_loopback_recheck"] == "reachable"
+        assert "host loopback reachable" in run.meta["error"] and "agent_start" not in rec.log
+    else:
+        assert run.meta["host_loopback_recheck"] == "blocked"
+        assert run.termination_reason is TerminationReason.FINISHED
+
+
+def test_freeform_cold_boot_without_a_probe_is_refused(tmp_path, monkeypatch):
+    rec = ColdBootRecorder(tmp_path / "runs")  # has stop/start but no loopback_reachable
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+    bj = tmp_path / "baseline.json"
+    bj.write_text(json.dumps({"host_loopback_blocked": True}))
+    run = _run(rec, task_id=None, goal="browse", baseline_json=bj)
+    assert run.meta["host_loopback_recheck"] == "unavailable"
+    assert run.termination_reason is TerminationReason.ERROR and "agent_start" not in rec.log
+    scored = _run(ColdBootRecorder(tmp_path / "runs2"))  # scored runs: snapshot state suffices
+    assert "host_loopback_recheck" not in scored.meta and scored.termination_reason is TerminationReason.FINISHED
+
+
+def test_cancel_accepted_during_the_agents_last_call_still_ends_cancelled(rec):
+    class CancelThenFinish(ScriptedClient):
+        def create(self, **kw):
+            if self.calls == 1:
+                assert runner.request_cancel("job-12") is True
+            return super().create(**kw)
+
+    client = CancelThenFinish([("tap", {"x": 1, "y": 1}),
+                               ("finish", {"verdict": "done", "summary": "all good"})])
+    run = _run(rec, client=client, meta={"job_id": "job-12"})
+    assert run.meta["cancelled"] is True and run.termination_reason is TerminationReason.ERROR
+    assert run.verifier_result is None and "verify" not in rec.log
+    assert "usage_note" not in run.meta  # the completed turn's usage was captured

@@ -67,6 +67,8 @@ class SeedPlan:
     notes: list[SeedNote] = field(default_factory=list)
     goal_params: dict[str, Any] = field(default_factory=dict)
     expected: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Task-specific seed steps; each has apply(target) -> None and runs last.
+    extras: list[Any] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -136,17 +138,30 @@ def generate_plan(seed: int, task: Any = None, *, n_contacts: int = 6, n_notes: 
 
 def apply(plan: SeedPlan, target: SeedTarget, markor_dir: str | None = None) -> AppliedSeed:
     """Write the plan's contacts, events and notes to the device. Never
-    writes plan.expected or plan.seed."""
+    writes plan.expected or plan.seed. A target with apply_batch() (the real
+    Inspector) gets everything in one call; others get per-item writes."""
     applied = AppliedSeed()
+    root = (markor_dir or target.markor_dir).rstrip("/")
+    batch = getattr(target, "apply_batch", None)
+    if callable(batch):
+        notes = [(f"{root}/{n.filename}", n.content.encode()) for n in plan.notes]
+        applied.contact_ids, applied.event_ids = batch(list(plan.contacts), list(plan.events), notes)
+        applied.files = [path for path, _ in notes]
+    else:
+        _apply_items(plan, target, root, applied)
+    for extra in plan.extras:
+        extra.apply(target)
+    return applied
+
+
+def _apply_items(plan: SeedPlan, target: SeedTarget, root: str, applied: AppliedSeed) -> None:
     for c in plan.contacts:
         applied.contact_ids.append(target.insert_contact(c.name, c.phone, c.email))
     if plan.events:
         cal = target.ensure_calendar()
         for e in plan.events:
             applied.event_ids.append(target.insert_event(cal, e.title, e.start_ms, e.end_ms, e.location))
-    root = (markor_dir or target.markor_dir).rstrip("/")
     for n in plan.notes:
         path = f"{root}/{n.filename}"
         target.push_file(path, n.content.encode())
         applied.files.append(path)
-    return applied

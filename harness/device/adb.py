@@ -24,6 +24,8 @@ BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 DUMP_PATH = "/sdcard/window_dump.xml"
 TEXT_CHUNK = 100
 MAX_LABEL = 120
+# Text of password fields is replaced by this before anything leaves ui_tree().
+REDACTED = "[redacted]"
 
 # name -> (uri, projection, where, sort). Built only from these constants, so
 # every query is a read-only `content query` with no agent-controlled text.
@@ -45,6 +47,12 @@ QUERIES: dict[str, tuple[str, list[str], str | None, str | None]] = {
         ["_id", "address", "body", "date", "type", "read"],
         None,
         "date DESC",
+    ),
+    "snackorders.orders": (
+        "content://com.labs.snackorders.provider/orders",
+        ["_id", "placed_at", "status", "item_count", "subtotal_cents", "shipping_cents", "total_cents"],
+        None,
+        None,
     ),
 }
 DEFAULT_LIMIT = 50
@@ -194,6 +202,9 @@ class AdbDevice:
                 flags.append("disabled")
             if a.get("password") == "true":
                 flags.append("password")
+                # Both free-text attributes we print may echo the typed secret.
+                text = REDACTED if text else text
+                desc = REDACTED if desc else desc
             pkg = a.get("package", "")
             if pkg and pkg not in packages:
                 packages.append(pkg)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from harness.contracts import RunRecord, StepRecord, TaskSpec, Verdict, VerifierResult
+from harness.contracts import FlowType, RunRecord, StepRecord, TaskSpec, Verdict, VerifierResult
 from harness.device.inspect import DeviceState
 from harness.verify.checks import END_STATE, PROCESS, SIDE_EFFECTS, Check, VerifyContext
 from harness.verify.diff import AllowedChanges, diff_states, side_effect_results
@@ -36,5 +36,12 @@ def run_verifier(task: TaskSpec, plan: Any, pre_state: DeviceState, post_state: 
         end_state=end_state,
         side_effects=side_effects,
         process=process,
-        self_report_agrees=None if verdict is None else (verdict == Verdict.DONE) == passed,
+        self_report_agrees=None if verdict is None else (verdict == expected_verdict(task)) == passed,
     )
+
+
+def expected_verdict(task: TaskSpec) -> Verdict:
+    """The finish verdict a correct run of this task ends with: INFEASIBLE for
+    an infeasible-goal (flow H) task, DONE otherwise. self_report_agrees is
+    whether the agent claiming that verdict matches the verifier's `passed`."""
+    return Verdict.INFEASIBLE if task.flow_type is FlowType.H else Verdict.DONE

@@ -122,6 +122,8 @@ def cmd_run(args: argparse.Namespace, config: Config, out: TextIO) -> int:
     policy = confirm_policy(args.confirm)
     if policy.note:
         print(f"confirmation: {args.confirm} -> {policy.effective} ({policy.note})", file=out)
+    if args.allow_chrome and args.goal is None:
+        raise RunnerError("--allow-chrome is only for freeform --goal runs; scored tasks never get Chrome")
     if args.goal is not None:
         targets: list[tuple[str | None, str | None]] = [(None, args.goal)]
     elif args.all:
@@ -138,7 +140,8 @@ def cmd_run(args: argparse.Namespace, config: Config, out: TextIO) -> int:
                 device_factory=env.device_factory, inspector_factory=env.inspector_factory,
                 emulator=env.emulator, store=store, model_client=env.model_client_factory(), seed=args.seed,
                 settings=env.settings, allow_unblocked=args.allow_unblocked,
-                lock_timeout_s=args.lock_timeout, meta={"fake": env.fake},
+                lock_timeout_s=args.lock_timeout, meta={"fake": env.fake}, windowed=args.windowed,
+                allow_packages=["com.android.chrome"] if args.allow_chrome else (),
             )
             runs.append(run)
             print(format_line(run), file=out)
@@ -195,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, help="fixed seed (same for every repeat)")
     run.add_argument("--allow-unblocked", action="store_true",
                      help="allow freeform runs when host loopback is not blocked")
+    run.add_argument("--allow-chrome", action="store_true",
+                     help="freeform --goal only: let the agent open com.android.chrome")
     run.add_argument("--lock-timeout", type=float, help="seconds to wait for the serial queue (default: wait)")
     run.set_defaults(func=cmd_run)
 

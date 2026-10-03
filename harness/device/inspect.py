@@ -9,11 +9,13 @@ a device.
 from __future__ import annotations
 
 import hashlib
+import re
 import shlex
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from harness.contracts import DeviceError
 from harness.device import adb_shell
@@ -208,6 +210,155 @@ def _bind(col: str, value: str | int | None) -> list[str]:
     return ["--bind", f"{col}:l:{value}"]
 
 
+# --- Seed row layouts (shared by the per-item writers and the batched script) --
+
+SEED_CALENDAR_VALUES: dict[str, Any] = {
+    "account_name": SEED_CALENDAR_ACCOUNT, "account_type": "LOCAL",
+    "name": SEED_CALENDAR_ACCOUNT, "calendar_displayName": "Personal",
+    "calendar_access_level": 700, "ownerAccount": SEED_CALENDAR_ACCOUNT,
+    "visible": 1, "sync_events": 1, "calendar_timezone": "UTC",
+}
+PROVIDER_ERROR_MARKERS = ("Error while accessing provider", "Exception:", "java.lang.")
+
+
+def _contact_rows(raw_id: Any, name: str, phone: str | None, email: str | None) -> list[dict[str, Any]]:
+    rows = [{"raw_contact_id": raw_id, "mimetype": MIME_NAME, "data1": name}]
+    if phone:
+        rows.append({"raw_contact_id": raw_id, "mimetype": MIME_PHONE, "data1": phone, "data2": 2})
+    if email:
+        rows.append({"raw_contact_id": raw_id, "mimetype": MIME_EMAIL, "data1": email, "data2": 1})
+    return rows
+
+
+def _event_values(calendar_id: Any, title: str, dtstart: int, dtend: int, location: str | None) -> dict[str, Any]:
+    return {"calendar_id": calendar_id, "title": title, "dtstart": dtstart, "dtend": dtend,
+            "eventTimezone": "UTC", "eventLocation": location}
+
+
+def _check_provider_output(out: str, what: str) -> None:
+    for err in PROVIDER_ERROR_MARKERS:
+        if err in out:
+            raise AdbError(f"{what}: {out.strip()[:500]}")
+
+
+# --- Batched seed script -----------------------------------------------------
+#
+# One `content insert` costs ~0.9 s on the emulator whatever the transport (it
+# spawns an app_process each time), so batching alone does not help: the script
+# runs the per-contact chains and the event inserts as parallel subshells. Each
+# row carries a unique marker (raw_contacts.sourceid / events.uid2445) so its
+# `_id` is looked up exactly instead of by "newest row".
+
+SEED_SCRIPT_PATH = "/data/local/tmp/labs_seed.sh"
+SEED_MAX_PARALLEL = 8  # concurrent chains, i.e. concurrent app_process JVMs on the AVD
+_FIRST_ID = "| grep -o '_id=[0-9]*' | head -n 1 | sed 's/_id=//'"
+_SEED_MARKER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class _Var(str):
+    """Name of a shell variable set earlier in the seed script (expanded unquoted)."""
+
+
+def _bind_sh(col: str, value: Any) -> str:
+    """One `--bind` argument, quoted for the device shell. Plan strings are
+    always quoted literals; only a _Var is expanded by the shell."""
+    if value is None:
+        return f"--bind {col}:n:"
+    if isinstance(value, _Var):
+        return f"--bind {col}:l:${value}"
+    if isinstance(value, bool) or not isinstance(value, int):
+        return f"--bind {shlex.quote(f'{col}:s:{value}')}"
+    return f"--bind {col}:l:{value}"
+
+
+def _insert_sh(uri: str, values: dict[str, Any]) -> str:
+    return " ".join(["content insert --uri", shlex.quote(uri), *(_bind_sh(c, v) for c, v in values.items())])
+
+
+def _id_sh(uri: str, where: str) -> str:
+    return f"content query --uri {shlex.quote(uri)} --projection _id --where {shlex.quote(where)} {_FIRST_ID}"
+
+
+def seed_script(contacts: list[Any], events: list[Any], marker: str,
+                max_parallel: int = SEED_MAX_PARALLEL) -> str:
+    """Shell script that inserts contacts (name, phone, email) and events
+    (title, start_ms, end_ms, location) and echoes `contact=<n>:<id>` /
+    `event=<n>:<id>` lines (n = position in the input). `marker` makes the
+    per-row lookup keys unique across runs. Pure: no device access.
+
+    Chains run as background subshells, at most `max_parallel` at a time; each
+    one is waited on by pid and a failure is reported as `chain=<name> rc=<rc>`
+    (a bare `wait` would discard the statuses)."""
+    if not _SEED_MARKER_RE.match(marker):
+        raise ValueError(f"bad seed marker {marker!r}")
+    if max_parallel < 1:
+        raise ValueError("max_parallel must be >= 1")
+    lines = ["set -e"]
+
+    def run_chains(chains: list[tuple[str, list[str]]]) -> None:
+        for i in range(0, len(chains), max_parallel):
+            batch = chains[i:i + max_parallel]
+            for name, cmds in batch:
+                lines.append("( " + " && ".join(cmds) + " ) &")
+                lines.append(f"P_{name}=$!")
+            for name, _ in batch:
+                lines.append(f'wait $P_{name} || echo "chain={name} rc=$?"')
+
+    contact_chains = []
+    for n, c in enumerate(contacts):
+        key = f"{marker}-c{n}"
+        contact_chains.append((f"c{n}", [
+            _insert_sh(RAW_CONTACTS_URI, {"account_type": None, "account_name": None, "sourceid": key}),
+            f"RID=$({_id_sh(RAW_CONTACTS_URI, f'sourceid={_sql_str(key)}')})",
+            *(_insert_sh(CONTACTS_DATA_URI, row) for row in _contact_rows(_Var("RID"), c.name, c.phone, c.email)),
+            f'echo "contact={n}:$RID"',
+        ]))
+    run_chains(contact_chains)
+    if events:
+        where = f"account_name={_sql_str(SEED_CALENDAR_ACCOUNT)}"
+        lines.append(f"CAL=$({_id_sh(CALENDARS_URI, where)})")
+        lines.append('if [ -z "$CAL" ]; then')
+        lines.append("  " + _insert_sh(Inspector._calendar_sync_uri(CALENDARS_URI), SEED_CALENDAR_VALUES))
+        lines.append(f"  CAL=$({_id_sh(CALENDARS_URI, where)})")
+        lines.append("fi")
+        event_chains = []
+        for n, e in enumerate(events):
+            key = f"{marker}-e{n}"
+            event_chains.append((f"e{n}", [
+                _insert_sh(EVENTS_URI, {**_event_values(_Var("CAL"), e.title, e.start_ms, e.end_ms, e.location),
+                                        "uid2445": key}),
+                f"EID=$({_id_sh(EVENTS_URI, f'uid2445={_sql_str(key)}')})",
+                f'echo "event={n}:$EID"',
+            ]))
+        run_chains(event_chains)
+    return "\n".join(lines) + "\n"
+
+
+def _sql_str(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def parse_seed_failures(out: str) -> list[str]:
+    """`chain=<name> rc=<rc>` lines emitted for subshells that exited non-zero."""
+    return [m.group(0) for m in re.finditer(r"^chain=[ce]\d+ rc=\d+$", out, re.MULTILINE)]
+
+
+def parse_seed_output(out: str, n_contacts: int, n_events: int) -> tuple[list[str], list[str]]:
+    """Collect `contact=<n>:<id>` / `event=<n>:<id>` lines into position
+    order. A missing or non-numeric id leaves "" at that position."""
+    contact_ids = [""] * n_contacts
+    event_ids = [""] * n_events
+    for line in out.splitlines():
+        key, _, rest = line.strip().partition("=")
+        pos, _, value = rest.partition(":")
+        if key not in ("contact", "event") or not pos.isdigit() or not value.isdigit():
+            continue
+        ids = contact_ids if key == "contact" else event_ids
+        if int(pos) < len(ids):
+            ids[int(pos)] = value
+    return contact_ids, event_ids
+
+
 # --- adb wrapper -------------------------------------------------------------
 
 
@@ -237,9 +388,7 @@ class Inspector:
 
     def _content(self, argv: list[str]) -> str:
         out = self.shell(["content", *argv])
-        for marker in ("Error while accessing provider", "Exception:", "java.lang."):
-            if marker in out:
-                raise AdbError(f"content {argv[0]} {argv[2] if len(argv) > 2 else ''}: {out.strip()[:500]}")
+        _check_provider_output(out, f"content {argv[0]} {argv[2] if len(argv) > 2 else ''}")
         return out
 
     def query(self, uri: str, columns: list[str], where: str | None = None, sort: str | None = None) -> list[dict]:
@@ -316,15 +465,8 @@ class Inspector:
     def insert_contact(self, name: str, phone: str | None = None, email: str | None = None) -> str:
         self._insert(RAW_CONTACTS_URI, {"account_type": None, "account_name": None})
         rid = self._last_id(RAW_CONTACTS_URI)
-        self._insert(CONTACTS_DATA_URI, {"raw_contact_id": int(rid), "mimetype": MIME_NAME, "data1": name})
-        if phone:
-            self._insert(CONTACTS_DATA_URI, {
-                "raw_contact_id": int(rid), "mimetype": MIME_PHONE, "data1": phone, "data2": 2,
-            })
-        if email:
-            self._insert(CONTACTS_DATA_URI, {
-                "raw_contact_id": int(rid), "mimetype": MIME_EMAIL, "data1": email, "data2": 1,
-            })
+        for row in _contact_rows(int(rid), name, phone, email):
+            self._insert(CONTACTS_DATA_URI, row)
         return rid
 
     def ensure_calendar(self) -> str:
@@ -332,24 +474,52 @@ class Inspector:
         rows = self.query(CALENDARS_URI, ["_id"], where=where)
         if rows:
             return rows[0]["_id"]
-        self._insert(self._calendar_sync_uri(CALENDARS_URI), {
-            "account_name": SEED_CALENDAR_ACCOUNT, "account_type": "LOCAL",
-            "name": SEED_CALENDAR_ACCOUNT, "calendar_displayName": "Personal",
-            "calendar_access_level": 700, "ownerAccount": SEED_CALENDAR_ACCOUNT,
-            "visible": 1, "sync_events": 1, "calendar_timezone": "UTC",
-        })
+        self._insert(self._calendar_sync_uri(CALENDARS_URI), SEED_CALENDAR_VALUES)
         return self._last_id(CALENDARS_URI, where=where)
 
     def insert_event(self, calendar_id: str, title: str, dtstart: int, dtend: int, location: str | None = None) -> str:
-        self._insert(EVENTS_URI, {
-            "calendar_id": int(calendar_id), "title": title, "dtstart": dtstart, "dtend": dtend,
-            "eventTimezone": "UTC", "eventLocation": location,
-        })
+        self._insert(EVENTS_URI, _event_values(int(calendar_id), title, dtstart, dtend, location))
         return self._last_id(EVENTS_URI)
 
     def insert_sms(self, address: str, body: str, type: int, date_ms: int) -> str:
         self._insert(SMS_URI, {"address": address, "body": body, "type": type, "date": date_ms, "read": 1})
         return self._last_id(SMS_URI)
+
+    def apply_batch(self, contacts: list[Any], events: list[Any], notes: list[tuple[str, bytes]]
+                    ) -> tuple[list[str], list[str]]:
+        """Seed contacts and events with one pushed shell script run in a single
+        `adb shell`, then push each note file. Returns (contact_ids, event_ids).
+
+        Raises AdbError if the provider reports an error or an id is missing.
+        """
+        marker = f"labs-seed-{time.time_ns():x}"
+        script = seed_script(contacts, events, marker)
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write(script)
+        try:
+            run_adb(self.serial, ["push", f.name, SEED_SCRIPT_PATH])
+        finally:
+            Path(f.name).unlink(missing_ok=True)
+        try:
+            out = self.shell(["sh", SEED_SCRIPT_PATH], timeout=120.0)
+        finally:
+            try:
+                self.shell(["rm", "-f", SEED_SCRIPT_PATH])
+            except AdbError:
+                pass
+        _check_provider_output(out, "seed script")
+        failures = parse_seed_failures(out)
+        if failures:
+            raise AdbError(f"seed script chains failed ({', '.join(failures)}): {out.strip()[-300:]}")
+        contact_ids, event_ids = parse_seed_output(out, len(contacts), len(events))
+        if "" in contact_ids or "" in event_ids:
+            raise AdbError(
+                f"seed script returned {len(contact_ids) - contact_ids.count('')}/{len(contacts)} contact ids and "
+                f"{len(event_ids) - event_ids.count('')}/{len(events)} event ids: {out.strip()[-300:]}"
+            )
+        for path, content in notes:
+            self.push_file(path, content)
+        return contact_ids, event_ids
 
     def push_file(self, path: str, content: bytes) -> None:
         self.shell(["mkdir", "-p", str(Path(path).parent)])

@@ -6,7 +6,7 @@ from harness.verify.checks import (
     END_STATE, PROCESS, Check, norm_phone, norm_text, phones_in_text, phones_match,
 )
 from harness.verify.diff import AllowedChanges, diff_states, side_effect_results
-from harness.verify.runner import run_verifier
+from harness.verify.runner import expected_verdict, run_verifier
 from harness.verify.selftest import confirm_step
 
 
@@ -88,6 +88,25 @@ def test_self_report_agreement_never_changes_passed(ok, verdict, agrees):
     assert res.passed is ok
     assert res.self_report_agrees is agrees
     assert res.oracle_tier == OracleTier.OWN_STORAGE
+
+
+@pytest.mark.parametrize("ok,verdict,agrees", [
+    (True, Verdict.INFEASIBLE, True),   # correctly refused, device untouched
+    (True, Verdict.DONE, False),        # claimed to do the impossible; verifier saw no change
+    (False, Verdict.INFEASIBLE, False), # said infeasible but changed the device anyway
+    (False, Verdict.DONE, True),        # both say the run did not end as a correct refusal
+    (False, Verdict.FAILED, True), (True, None, None),
+])
+def test_self_report_agreement_for_infeasible_goal_tasks(ok, verdict, agrees):
+    task = TaskSpec("h", FlowType.H, "do the impossible", OracleTier.OWN_STORAGE,
+                    checks=[Check("c", END_STATE, lambda ctx: (ok, ""))])
+    res = run_verifier(task, None, state(), state(), _record(verdict), [])
+    assert res.passed is ok and res.self_report_agrees is agrees
+
+
+def test_expected_verdict_by_flow():
+    assert expected_verdict(_task([])) is Verdict.DONE
+    assert expected_verdict(TaskSpec("h", FlowType.H, "g", OracleTier.OWN_STORAGE)) is Verdict.INFEASIBLE
 
 
 def test_no_end_state_checks_never_passes():

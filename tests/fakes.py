@@ -20,6 +20,11 @@ class FakeInspector:
         self.events_db: dict[str, Event] = {}
         self.files_db: dict[str, bytes] = {}
         self.calendar_id: str | None = None
+        self.shell_calls: list[list[str]] = []
+
+    def shell(self, argv: list[str], timeout: float = 30.0) -> str:
+        self.shell_calls.append(list(argv))
+        return ""
 
     def _id(self) -> str:
         return str(next(self._ids))

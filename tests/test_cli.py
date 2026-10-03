@@ -94,3 +94,31 @@ def test_module_entry_point_end_to_end_with_prompt_and_no_tty(tmp_path):
     run, _ = store.load_run(run_id)
     assert run.meta["confirm_policy"] == "prompt" and run.meta["confirm_effective"] == "reject"
     assert (store.run_dir(run_id) / "replay.html").is_file()
+
+
+def test_allow_chrome_is_freeform_only(tmp_path, monkeypatch):
+    assert _main(tmp_path, "run", "--task", "a_markor_note", "--fake", "--allow-chrome")[0] == 2
+    monkeypatch.setattr(runner, "host_loopback_blocked", lambda *a, **kw: True)
+    code, _, store = _main(tmp_path, "run", "--goal", "open Chrome", "--fake", "--confirm", "approve", "--allow-chrome")
+    assert code == 0
+    (run_id,) = store.list_runs()
+    run, _ = store.load_run(run_id)
+    assert run.meta["blocked_packages"] == []
+    code, _, store = _main(tmp_path, "run", "--goal", "open Chrome", "--fake", "--confirm", "approve")
+    run, _ = store.load_run([r for r in store.list_runs() if r != run_id][0])
+    assert run.meta["blocked_packages"] == ["com.android.chrome"]
+
+
+def test_windowed_flag_reaches_run_task(tmp_path, monkeypatch):
+    seen = {}
+    real = cli.run_task
+
+    def spy(*a, **kw):
+        seen["windowed"] = kw["windowed"]
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cli, "run_task", spy)
+    assert _main(tmp_path, "run", "--task", "a_markor_note", "--fake", "--confirm", "approve", "--windowed")[0] == 0
+    assert seen == {"windowed": True}
+    _main(tmp_path, "run", "--task", "a_markor_note", "--fake", "--confirm", "approve")
+    assert seen == {"windowed": False}

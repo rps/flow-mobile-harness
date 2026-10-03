@@ -1,4 +1,5 @@
-"""Provision and control the harness emulator (AVD labs_agent_api36).
+"""Provision and control the harness emulator (AVD p2_harness_api36 by default;
+override with LABS_AVD_NAME / LABS_AVD_PORT).
 
 Only this AVD is ever created, booted or killed; all adb calls pin its serial.
 Runs restore the `baseline` snapshot and never save back. save_snapshot is only
@@ -13,6 +14,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import shlex
 import socket
 import subprocess
@@ -27,13 +29,42 @@ from harness.device.adb_shell import ADB, SDK, adb
 
 log = logging.getLogger(__name__)
 
-AVD_NAME = "labs_agent_api36"
-SYSTEM_IMAGE = "system-images;android-36.1;google_apis;arm64-v8a"
+AVD_NAME = os.environ.get("LABS_AVD_NAME", "p2_harness_api36")
+
+
+def _system_image_from_env() -> str:
+    """LABS_SYSTEM_IMAGE: an sdkmanager package id of the shape
+    system-images;<api>;<tag>;<abi>. Default: the arm64 google_apis image."""
+    image = os.environ.get("LABS_SYSTEM_IMAGE", "system-images;android-36.1;google_apis;arm64-v8a")
+    parts = image.split(";")
+    if len(parts) != 4 or parts[0] != "system-images" or not all(parts):
+        raise DeviceError(f"LABS_SYSTEM_IMAGE={image!r} must look like system-images;<api>;<tag>;<abi>")
+    return image
+
+
+SYSTEM_IMAGE = _system_image_from_env()
+# SDK path of the image's package directory, e.g. system-images/android-36.1/google_apis/arm64-v8a
+SYSTEM_IMAGE_DIR = Path(*SYSTEM_IMAGE.split(";"))
 DEVICE_PROFILE = "pixel_7"
 AVD_OVERRIDES = {"hw.ramSize": "2048M", "hw.gpu.enabled": "yes", "disk.dataPartition.size": "6G", "hw.keyboard": "yes"}
 TOP_INI = Path.home() / ".android" / "avd" / f"{AVD_NAME}.ini"
 CONFIG_INI = Path.home() / ".android" / "avd" / f"{AVD_NAME}.avd" / "config.ini"
-PORT = 5584  # adb auto-discovers 5555-5586 only; 5554/5580 are used by other emulators here
+
+
+def _port_from_env() -> int:
+    """LABS_AVD_PORT: an even emulator console port in 5554..5682 (the
+    emulator's range; adb talks to console port + 1). Default 5584."""
+    raw = os.environ.get("LABS_AVD_PORT", "5584")
+    try:
+        port = int(raw)
+    except ValueError:
+        raise DeviceError(f"LABS_AVD_PORT={raw!r} is not an integer") from None
+    if port % 2 or not 5554 <= port <= 5682:
+        raise DeviceError(f"LABS_AVD_PORT={port} must be an even port in 5554..5682")
+    return port
+
+
+PORT = _port_from_env()  # 5554/5580 are used by other emulators on this host
 SERIAL = f"emulator-{PORT}"
 BASELINE = "baseline"
 HOST_ALIAS = "10.0.2.2"
@@ -106,7 +137,7 @@ def create_avd() -> bool:
 
 
 def _image_api_level() -> str:
-    props = SDK / "system-images" / "android-36.1" / "google_apis" / "arm64-v8a" / "source.properties"
+    props = SDK / SYSTEM_IMAGE_DIR / "source.properties"
     for line in props.read_text().splitlines():
         if line.startswith("AndroidVersion.ApiLevel="):
             return line.split("=", 1)[1].strip()

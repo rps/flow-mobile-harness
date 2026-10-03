@@ -19,8 +19,9 @@ import fcntl
 import json
 import logging
 import sys
+import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +53,9 @@ log = logging.getLogger(__name__)
 BASELINE_SNAPSHOT = "baseline"
 BASELINE_JSON = Path(__file__).resolve().parent / "emulator" / "baseline.json"
 POLICIES = ("prompt", "approve", "reject")
+# Packages open_app refuses unless a freeform run allows them (scored tasks never do).
+BLOCKED_PACKAGES = frozenset({"com.android.chrome"})
+CHROME = "com.android.chrome"
 
 
 class RunnerError(Exception):
@@ -66,6 +70,90 @@ class RunnerBusy(RunnerError):
     """Another run holds this serial's queue lock."""
 
 
+class RunCancelled(RunnerError):
+    """request_cancel() was called for this run; raised at the next device call.
+
+    Deliberately not a DeviceError: the agent loop would treat that as a
+    retryable tool error and spend up to max_consecutive_device_errors more
+    model calls before stopping. Unwinding past the loop loses the run's
+    per-run usage figures (ledger.json still has every call), which the run
+    meta notes.
+    """
+
+
+# --- Cancellation ---------------------------------------------------------------
+
+class _Active:
+    """One live run as request_cancel sees it."""
+
+    def __init__(self, meta: dict[str, Any]) -> None:
+        self.meta = meta
+        self.gate: _GatedDevice | None = None  # set once the agent stage starts
+        self.agent_done = False  # after this, a cancel can no longer take effect
+
+
+_ACTIVE: dict[str, _Active] = {}  # cancel key -> run
+_CANCELLED: set[str] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def request_cancel(key: str) -> bool:
+    """Ask the run whose meta["job_id"] (or run_id) is `key` to stop.
+
+    Takes effect at the run's next device call, at its next stage boundary
+    (restore, seed, pre_state, agent) or while it waits for the serial lock:
+    the trace finishes with termination ERROR and meta["cancelled"] = true,
+    and the baseline snapshot is restored if the device was touched. A cancel
+    during seeding still completes the seed and pre-state snapshot first.
+    Returns True only if the cancel can still take effect; a request after the
+    agent's turn (post-state, verify) returns False and is recorded as
+    meta["cancel_requested_late"]. Unknown keys return False.
+    """
+    with _ACTIVE_LOCK:
+        active = _ACTIVE.get(key)
+        if active is None:
+            return False
+        if active.agent_done:
+            active.meta["cancel_requested_late"] = True
+            return False
+        _CANCELLED.add(key)
+        if active.gate is not None:
+            active.gate.cancel()
+    return True
+
+
+def _is_cancelled(keys: Iterable[str]) -> bool:
+    with _ACTIVE_LOCK:
+        return any(k in _CANCELLED for k in keys)
+
+
+def _register(keys: Iterable[str], active: _Active, gate: "_GatedDevice | None" = None) -> None:
+    with _ACTIVE_LOCK:
+        active.gate = gate
+        for k in keys:
+            _ACTIVE[k] = active
+            if gate is not None and k in _CANCELLED:
+                gate.cancel()
+
+
+def _agent_done(keys: Iterable[str], gate: "_GatedDevice") -> bool:
+    """Mark the agent stage over; returns True if a cancel was accepted before
+    this moment (so the run must end as cancelled, not scored). Atomic with
+    request_cancel: after this, requests are refused as late."""
+    with _ACTIVE_LOCK:
+        for k in keys:
+            if k in _ACTIVE:
+                _ACTIVE[k].agent_done = True
+        return gate.cancelled
+
+
+def _unregister(keys: Iterable[str]) -> None:
+    with _ACTIVE_LOCK:
+        for k in keys:
+            _ACTIVE.pop(k, None)
+            _CANCELLED.discard(k)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -74,15 +162,26 @@ def _now() -> str:
 
 
 class _GatedDevice:
-    """Delegates to the real device until close(); afterwards every call raises."""
+    """Delegates to the real device until close(); afterwards every call raises.
+    cancel() makes every further call raise RunCancelled instead; open_app
+    refuses packages in `blocked`."""
 
-    def __init__(self, inner: Device) -> None:
+    def __init__(self, inner: Device, blocked: Iterable[str] = ()) -> None:
         self._inner = inner
         self._closed = False
+        self._cancelled = False
+        self._blocked = frozenset(blocked)
 
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def close(self) -> None:
         if self._closed:
@@ -93,6 +192,8 @@ class _GatedDevice:
             inner_close()
 
     def _live(self) -> Device:
+        if self._cancelled:
+            raise RunCancelled("run cancelled by request")
         if self._closed:
             raise DeviceError("device is closed: the agent's turn is over")
         return self._inner
@@ -119,7 +220,10 @@ class _GatedDevice:
         self._live().home()
 
     def open_app(self, package: str) -> None:
-        self._live().open_app(package)
+        dev = self._live()
+        if package in self._blocked:
+            raise DeviceError(f"{package} is not allowed in this run")
+        dev.open_app(package)
 
     def allowed_queries(self) -> list[str]:
         return self._live().allowed_queries()
@@ -210,23 +314,27 @@ def host_loopback_blocked(path: str | Path = BASELINE_JSON) -> bool:
 
 
 @contextmanager
-def serial_lock(runs_dir: str | Path, serial: str, timeout_s: float | None = None) -> Iterator[None]:
+def serial_lock(runs_dir: str | Path, serial: str, timeout_s: float | None = None,
+                cancelled: Callable[[], bool] | None = None) -> Iterator[None]:
     """Exclusive lock for one serial. Blocks (the queue); with timeout_s,
-    raises RunnerBusy once it passes."""
+    raises RunnerBusy once it passes; with `cancelled`, the wait polls it and
+    raises RunCancelled when it turns true."""
     path = Path(runs_dir) / f".queue-{serial}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(path, "a")
     try:
-        if timeout_s is None:
+        if timeout_s is None and cancelled is None:
             fcntl.flock(fh, fcntl.LOCK_EX)
         else:
-            deadline = time.monotonic() + timeout_s
+            deadline = None if timeout_s is None else time.monotonic() + timeout_s
             while True:
                 try:
                     fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.monotonic() >= deadline:
+                    if cancelled is not None and cancelled():
+                        raise RunCancelled("run cancelled by request while queued") from None
+                    if deadline is not None and time.monotonic() >= deadline:
                         raise RunnerBusy(f"another run holds the queue for {serial}") from None
                     time.sleep(0.05)
         try:
@@ -258,11 +366,18 @@ def run_task(
     allow_unblocked: bool = False,
     baseline_json: str | Path | None = None,
     meta: dict[str, Any] | None = None,
+    allow_packages: Iterable[str] = (),
+    windowed: bool = False,
 ) -> RunRecord:
     """Run one task (task_id) or one freeform goal (goal); exactly one is given.
 
-    `emulator` needs restore_snapshot(name). Returns the finished RunRecord;
-    failures inside the sequence are recorded as termination ERROR, not raised.
+    `emulator` needs restore_snapshot(name); if it also has stop() and
+    start(windowed=) a failed restore is retried once after a cold boot
+    (`windowed` is passed to that start; callers with a window pass True).
+    `allow_packages` lifts BLOCKED_PACKAGES entries for a freeform run only.
+    meta["job_id"], if given, is a key for request_cancel(). Returns the
+    finished RunRecord; failures inside the sequence are recorded as
+    termination ERROR, not raised.
     """
     if (task_id is None) == (goal is None):
         raise ValueError("give exactly one of task_id or goal")
@@ -278,16 +393,100 @@ def run_task(
     run_meta = {**(meta or {}), **policy.meta(), "serial": serial}
     if task is None:
         run_meta["allow_unblocked"] = allow_unblocked
-    with serial_lock(store.runs_dir, serial, lock_timeout_s):
-        return _sequence(task, goal, config, policy, run_meta, device_factory, inspector_factory,
-                         emulator, store, model_client, seed, settings)
+    blocked = set(BLOCKED_PACKAGES)
+    if task is None:
+        blocked -= set(allow_packages)
+    run_meta["blocked_packages"] = sorted(blocked)
+    job_keys = [str(run_meta["job_id"])] if run_meta.get("job_id") is not None else []
+    active = _Active(run_meta)
+    _register(job_keys, active)  # cancellable while queued for the serial lock too
+    args = (task, goal, config, policy, run_meta, device_factory, inspector_factory,
+            emulator, store, model_client, seed, settings, blocked, windowed, job_keys, active)
+    try:
+        try:
+            with serial_lock(store.runs_dir, serial, lock_timeout_s,
+                             cancelled=(lambda: _is_cancelled(job_keys)) if job_keys else None):
+                return _sequence(*args)
+        except RunCancelled:
+            # Cancelled while queued: _sequence sees the cancel before touching
+            # the device and only writes the cancelled trace, so no lock is needed.
+            return _sequence(*args)
+    finally:
+        _unregister(job_keys)
+
+
+def _restore(emulator: Any, run_meta: dict[str, Any], windowed: bool) -> None:
+    """restore_snapshot, retried once after stop + cold boot; the retry is
+    recorded in meta["restore_retry"]."""
+    try:
+        emulator.restore_snapshot(BASELINE_SNAPSHOT)
+        return
+    except Exception as first:
+        if not (callable(getattr(emulator, "stop", None)) and callable(getattr(emulator, "start", None))):
+            raise
+        log.warning("restore failed (%s); stopping and cold-booting the emulator once", first)
+        retry: dict[str, Any] = {"error": f"{type(first).__name__}: {first}"}
+        run_meta["restore_retry"] = retry
+    emulator.stop()
+    retry["boot_s"] = round(emulator.start(windowed=windowed), 1)
+    emulator.restore_snapshot(BASELINE_SNAPSHOT)
+    retry["ok"] = True
+
+
+def _set_chrome(inspector: Any, blocked: set[str], run_meta: dict[str, Any]) -> None:
+    """Second layer of the Chrome block: disable the package for this run (the
+    next baseline restore brings it back), or re-enable it for a freeform run
+    that allowed it. Records meta["chrome_disabled"] = True / False / reason.
+
+    Fails closed: when Chrome must be blocked and the disable cannot be done,
+    a DeviceError ends the run (termination ERROR) unless meta["fake"] says
+    this is a fake-device run, which has no Chrome to block.
+    """
+    disable = CHROME in blocked
+    shell = getattr(inspector, "shell", None)
+    if not callable(shell):
+        run_meta["chrome_disabled"] = "unsupported: inspector has no shell"
+        if disable and not run_meta.get("fake"):
+            raise DeviceError(f"cannot disable {CHROME}: inspector has no shell")
+        return
+    try:
+        if disable:
+            shell(["pm", "disable-user", "--user", "0", CHROME])
+        else:
+            shell(["pm", "enable", CHROME])
+        run_meta["chrome_disabled"] = disable
+    except Exception as e:
+        run_meta["chrome_disabled"] = f"{type(e).__name__}: {e}"
+        if disable:
+            raise DeviceError(f"cannot disable {CHROME}, refusing to run scored: {e}") from e
+        log.warning("could not enable %s: %s", CHROME, e)
+
+
+def _recheck_loopback(emulator: Any, run_meta: dict[str, Any]) -> None:
+    """A freeform run trusts baseline.json's host_loopback_blocked. After a cold
+    boot the emulator is a fresh process, so ask it again; fail closed if the
+    probe is unavailable or the host is reachable."""
+    probe = getattr(emulator, "loopback_reachable", None)
+    if not callable(probe):
+        run_meta["host_loopback_recheck"] = "unavailable"
+        raise RunRefused("freeform run after a cold boot: emulator cannot re-check the host loopback block")
+    reachable = probe()
+    run_meta["host_loopback_recheck"] = "reachable" if reachable else "blocked"
+    if reachable:
+        raise RunRefused("freeform run refused: host loopback reachable after the cold boot")
 
 
 def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_factory,
-              emulator, store, model_client, seed, settings) -> RunRecord:
+              emulator, store, model_client, seed, settings, blocked, windowed, job_keys, active) -> RunRecord:
     t0 = time.monotonic()
     started_at = _now()
     run_id = new_run_id()
+    cancel_keys = [run_id, *job_keys]
+    _register(cancel_keys, active)
+
+    def check_cancel() -> None:
+        if _is_cancelled(cancel_keys):
+            raise RunCancelled("run cancelled by request")
     flow = task.flow_type if task is not None else FlowType.FREEFORM
     run_goal = goal if task is None else task.goal
     run: RunRecord | None = None
@@ -297,10 +496,16 @@ def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_fa
     seed_used: int | None = None
     stage = "restore"
     error: BaseException | None = None
+    outcome = None
     try:
-        emulator.restore_snapshot(BASELINE_SNAPSHOT)
+        check_cancel()
+        _restore(emulator, run_meta, windowed)
+        if task is None and "restore_retry" in run_meta and not run_meta.get("allow_unblocked"):
+            _recheck_loopback(emulator, run_meta)
         stage = "seed"
+        check_cancel()
         inspector = inspector_factory()
+        _set_chrome(inspector, blocked, run_meta)
         plan = None
         if task is not None:
             seed_used = make_seed() if seed is None else seed
@@ -308,24 +513,29 @@ def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_fa
             run_goal = registry.render_goal(task, plan)
             apply(plan, inspector)
         stage = "pre_state"
+        check_cancel()
         pre = inspector.snapshot_state()
         stage = "trace"
         run = RunRecord(run_id=run_id, task_id=task.id if task else None, flow_type=flow, goal=run_goal,
                         model=config.model, started_at=started_at, meta=run_meta)
         writer = store.start_run(run)
         stage = "agent"
-        gate = _GatedDevice(device_factory())
+        check_cancel()
+        gate = _GatedDevice(device_factory(), blocked)
+        _register(cancel_keys, active, gate)
 
         def on_step(step: StepRecord, png: bytes | None, tree: str | None) -> None:
             steps.append(writer.write_step(step, png, tree))
 
         outcome = run_agent(run_goal, gate, config, policy.handler, on_step, model_client, settings=settings)
         gate.close()
+        run.usage = outcome.usage
+        run.estimated_cost_usd = outcome.estimated_cost_usd
+        if _agent_done(cancel_keys, gate):  # accepted cancel that the agent's last call did not hit
+            raise RunCancelled("run cancelled by request")
         run.agent_verdict = outcome.verdict
         run.agent_summary = outcome.summary
         run.termination_reason = outcome.termination_reason
-        run.usage = outcome.usage
-        run.estimated_cost_usd = outcome.estimated_cost_usd
         stage = "post_state"
         post = inspector.snapshot_state()
         if task is not None:
@@ -337,6 +547,7 @@ def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_fa
     finally:
         if gate is not None:
             gate.close()
+        _unregister(cancel_keys)
 
     if run is None:
         run = RunRecord(run_id=run_id, task_id=task.id if task else None, flow_type=flow, goal=run_goal,
@@ -348,6 +559,17 @@ def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_fa
         run.termination_reason = TerminationReason.ERROR
         run.agent_summary = run.agent_summary or message
         run.meta["error"] = message
+    if isinstance(error, RunCancelled):
+        run.meta["cancelled"] = True
+        if stage == "agent" and outcome is None:
+            run.meta["usage_note"] = "cancelled mid-turn: per-run usage not captured; ledger.json has every call"
+        if stage != "restore":  # the device was touched: put it back
+            try:
+                _restore(emulator, run.meta, windowed)
+                run.meta["restored_after_cancel"] = True
+            except Exception as e:
+                log.exception("restore after cancelling run %s failed", run_id)
+                run.meta["restored_after_cancel"] = f"{type(e).__name__}: {e}"
     run.ended_at = _now()
     run.seed = seed_used
     run.meta["wall_s"] = round(time.monotonic() - t0, 3)
