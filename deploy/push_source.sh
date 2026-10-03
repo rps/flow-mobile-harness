@@ -5,6 +5,11 @@
 #
 #   deploy/push_source.sh [REF]        REF: local branch, tag or commit (a commit is bundled via a transient ref)
 #   LABS_REMOTE_DIR=labs               checkout directory under $HOME on the VM
+#
+# The VM's provisioned harness/emulator/baseline.json and stock_apps.txt (written by
+# `manager provision` on the VM, tracked in git with the Mac's values) are backed up to
+# ~/.config/labs/baseline/ before the checkout and copied back afterwards, so a change to
+# those files on main neither blocks the checkout nor replaces the VM's baseline record.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/gcloud.sh
@@ -46,7 +51,14 @@ vm_ssh "set -euo pipefail
   [ -d .git ] || git init -q
   git bundle verify /tmp/labs.bundle >/dev/null
   git fetch -q /tmp/labs.bundle '$BUNDLE_REF'
+  keep='harness/emulator/baseline.json harness/emulator/stock_apps.txt'
+  bak=~/.config/labs/baseline
+  kept=0
+  if [ -d .git ] && git rev-parse -q --verify HEAD >/dev/null && ! git diff --quiet -- \$keep 2>/dev/null; then
+    mkdir -p \$bak && cp -p \$keep \$bak/ && git checkout -q -- \$keep && kept=1 && echo '[vm] VM baseline files backed up to ~/.config/labs/baseline'
+  fi
   git checkout -q -B deploy FETCH_HEAD
+  if [ \$kept = 1 ]; then cp -p \$bak/baseline.json \$bak/stock_apps.txt harness/emulator/ && echo '[vm] VM baseline files restored over the checkout'; fi
   rm -f /tmp/labs.bundle
   echo \"[vm] HEAD: \$(git log --oneline -1)\"
   [ \"\$(git rev-parse HEAD)\" = '$SHA' ] || { echo '[vm] HEAD does not match the bundled ref' >&2; exit 1; }

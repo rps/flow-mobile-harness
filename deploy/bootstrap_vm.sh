@@ -11,7 +11,7 @@
 #   pinned in harness/emulator/manager.py; a mismatch is a hard failure.
 set -euo pipefail
 
-LABS_DIR="${LABS_DIR:-$HOME/labs}"
+LABS_DIR="${LABS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"   # the checkout this script lives in
 ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
 SYSTEM_IMAGE="${LABS_SYSTEM_IMAGE:-system-images;android-36.1;google_apis;x86_64}"
 PY=python3.12
@@ -133,11 +133,14 @@ log "markor: $apk sha256 ok"
 # --- 5. Environment file ----------------------------------------------------
 cat >"$ENV_FILE" <<ENV
 # written by deploy/bootstrap_vm.sh; source from an interactive shell.
-# Only fills variables that are unset, so values given on a command line win.
+# Only fills variables that are unset, so values given on a command line win. Not sourced by
+# non-interactive gcloud --command shells: the deploy scripts source it themselves.
 export ANDROID_HOME="\${ANDROID_HOME:-$ANDROID_HOME}"
 export ANDROID_SDK_ROOT="\$ANDROID_HOME"
-export LABS_DIR="\${LABS_DIR:-$LABS_DIR}"
 export LABS_SYSTEM_IMAGE="\${LABS_SYSTEM_IMAGE:-$SYSTEM_IMAGE}"
+# The VM's one harness AVD (deploy/RUNBOOK.md §6b). Scripts derive LABS_DIR from their own location.
+export LABS_AVD_NAME="\${LABS_AVD_NAME:-${LABS_AVD_NAME:-cloud_harness}}"
+export LABS_AVD_PORT="\${LABS_AVD_PORT:-${LABS_AVD_PORT:-5584}}"
 case ":\$PATH:" in *":\$ANDROID_HOME/platform-tools:"*) ;; *)
   export PATH="\$ANDROID_HOME/platform-tools:\$ANDROID_HOME/emulator:\$ANDROID_HOME/cmdline-tools/latest/bin:\$PATH" ;;
 esac

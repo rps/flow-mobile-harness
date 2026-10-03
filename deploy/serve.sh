@@ -4,7 +4,9 @@
 # The UI token lives in ~/.config/labs/ui_token (0600), generated once on the VM
 # so it survives restarts. Reach the UI only through an IAP tunnel; see RUNBOOK.md.
 set -euo pipefail
-LABS_DIR="${LABS_DIR:-$HOME/labs}"
+LABS_DIR="${LABS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# gcloud --command shells are non-interactive and skip ~/.bashrc, so load the VM environment here.
+[ -f "$HOME/labs-env.sh" ] && . "$HOME/labs-env.sh"
 PORT="${HARNESS_UI_PORT:-8765}"
 TOKEN_FILE="$HOME/.config/labs/ui_token"
 PIDFILE="$HOME/.config/labs/server.pid"
@@ -23,6 +25,13 @@ case "${1:-}" in
   start)
     if running; then echo "already running (pid $(cat "$PIDFILE"))"; exit 0; fi
     [ -x "$LABS_DIR/.venv/bin/python" ] || { echo "no venv at $LABS_DIR/.venv; run bootstrap_vm.sh" >&2; exit 1; }
+    # A real (non-fake) job inherits these; without them the manager falls back to the Mac's AVD
+    # name, the arm64 image and ~/Library/Android/sdk. Refuse to start rather than fail later.
+    for v in ANDROID_HOME LABS_AVD_NAME LABS_AVD_PORT LABS_SYSTEM_IMAGE; do
+      [ -n "${!v:-}" ] || { echo "$v is not set: re-run deploy/bootstrap_vm.sh (rewrites ~/labs-env.sh) or export it; refusing to start" >&2; exit 1; }
+    done
+    export ANDROID_HOME LABS_AVD_NAME LABS_AVD_PORT LABS_SYSTEM_IMAGE
+    echo "device env: ANDROID_HOME=$ANDROID_HOME LABS_AVD_NAME=$LABS_AVD_NAME LABS_AVD_PORT=$LABS_AVD_PORT LABS_SYSTEM_IMAGE=$LABS_SYSTEM_IMAGE"
     if ss -Htln "sport = :$PORT" | grep -q .; then
       echo "port $PORT is already in use by another process (stale server?): $(ss -Hltnp "sport = :$PORT" | grep -o 'users:.*')" >&2; exit 1
     fi

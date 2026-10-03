@@ -13,17 +13,28 @@
 # (mode=patched:<attrs>), so the AVD name, serial and image are always the
 # ones requested here and never the manager's defaults.
 #
-# Overrides: LABS_AVD_NAME (cloud_check) LABS_AVD_PORT (5584)
+# Overrides: LABS_AVD_NAME (cloud_check) LABS_AVD_PORT (5586; 5584 is the harness AVD)
 #            LABS_SYSTEM_IMAGE (system-images;android-36.1;google_apis;x86_64)
-#            LABS_DIR (~/labs) ANDROID_HOME (~/android-sdk) KEEP_AVD=1 keeps the AVD.
+#            LABS_DIR (this checkout) ANDROID_HOME (~/android-sdk) KEEP_AVD=1 keeps the AVD.
 set -euo pipefail
-# labs-env.sh only fills unset variables, so command-line overrides win.
-[ -f "$HOME/labs-env.sh" ] && . "$HOME/labs-env.sh"
-export LABS_DIR="${LABS_DIR:-$HOME/labs}"
-export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
+# Throwaway defaults are set BEFORE sourcing labs-env.sh (which only fills unset variables and
+# carries the real harness AVD's name/port). The manager addresses the device by serial, so the
+# throwaway also gets its own port (5586) and the script refuses to share the harness AVD's name
+# or port: otherwise the final stop() could kill the real emulator in a race.
+export LABS_DIR="${LABS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export LABS_AVD_NAME="${LABS_AVD_NAME:-cloud_check}"
-export LABS_AVD_PORT="${LABS_AVD_PORT:-5584}"
+export LABS_AVD_PORT="${LABS_AVD_PORT:-5586}"
 export LABS_SYSTEM_IMAGE="${LABS_SYSTEM_IMAGE:-system-images;android-36.1;google_apis;x86_64}"
+if [ -f "$HOME/labs-env.sh" ]; then
+  # labs-env.sh fills only unset variables, so read its own values with ours unset.
+  read -r harness_name harness_port < <(env -u LABS_AVD_NAME -u LABS_AVD_PORT bash -c '. "$HOME/labs-env.sh"; echo "${LABS_AVD_NAME:-} ${LABS_AVD_PORT:-}"')
+  if [ "$LABS_AVD_NAME" = "${harness_name:-}" ] || [ "$LABS_AVD_PORT" = "${harness_port:-}" ]; then
+    echo "LABS_AVD_NAME=$LABS_AVD_NAME / LABS_AVD_PORT=$LABS_AVD_PORT collides with the harness AVD ($harness_name on $harness_port) in ~/labs-env.sh; refusing" >&2
+    exit 1
+  fi
+  . "$HOME/labs-env.sh"
+fi
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
 export KEEP_AVD="${KEEP_AVD:-0}"
 export PYTHONPATH="$LABS_DIR"
 PY="$LABS_DIR/.venv/bin/python"
