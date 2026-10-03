@@ -35,6 +35,7 @@ Match User $USER_NAME
     KbdInteractiveAuthentication no
     AuthorizedKeysFile .ssh/authorized_keys
     AllowTcpForwarding local
+    AllowStreamLocalForwarding no
     PermitOpen 127.0.0.1:$PORT
     PermitTTY no
     X11Forwarding no
