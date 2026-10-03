@@ -42,8 +42,6 @@ Jetsnack wraps Material components, customizing them to use its color system. Se
 
 ### Custom Layout
 
-<img src="screenshots/snack_details.gif"/>
-
 Jetsnack utilizes custom [`Layout`](https://developer.android.com/reference/kotlin/androidx/compose/ui/package-summary#layout_1)s to achieve its design. See:
 
 * [`CollapsingImageLayout`](app/src/main/java/com/example/jetsnack/ui/snackdetail/SnackDetail.kt#L274) shown above.
