@@ -610,9 +610,12 @@
       let cfg = {},
         tasks = [],
         flows = [],
-        current = null,
+        current = null, // the job whose events are on screen
+        myJob = null, // the job this browser submitted (queued, running or just finished)
         source = null,
-        devStatus = null;
+        devStatus = null,
+        pendingWatch = null;
+      const isMine = (j) => !!(j && myJob && j.job_id === myJob.job_id);
       // "[Flow X] Name" for a registered task; a retired id stays as it is
       function taskLabel(id, flow) {
         if (!id || id === "freeform") return "Freeform Goal";
@@ -674,7 +677,7 @@
           box.replaceChildren();
         } else {
           const c = s.current;
-          const mine = c && current && current.job_id === c.job_id;
+          const mine = isMine(c);
           const wait =
             !s.estimated_wait_s
               ? ""
@@ -698,7 +701,7 @@
               (c.steps_so_far === 1 ? "" : "s") +
               (c.status === "waiting_confirmation" ? ", waiting for a confirmation" : "") +
               ")";
-            const pos = current ? queuePosition(current.job_id) : null;
+            const pos = myJob ? queuePosition(myJob.job_id) : null;
             sub = pos
               ? "Your job is queued, position " + pos + " of " + s.queued + "."
               : mine
@@ -714,12 +717,45 @@
             sub = "The device is about to start the next one.";
           }
           box.replaceChildren(
-            el("div", { text: head }),
-            sub ? el("div", { class: "sub small", text: sub }) : null,
+            ...[
+              el("div", { text: head }),
+              sub ? el("div", { class: "sub small", text: sub }) : null,
+            ].filter(Boolean),
           );
+          const watching = current && c && current.job_id === c.job_id;
+          if (c && !watching) {
+            if (myJob && !TERMINAL.includes(myJob.status)) {
+              // our job is queued (or just started): show whatever the device is running
+              watchRunning(c.job_id);
+            } else {
+              const b = el("button", { class: "small", text: "Watch this run" });
+              b.addEventListener("click", () => watchRunning(c.job_id));
+              box.append(b);
+            }
+          }
           box.hidden = false;
         }
-        if (current && current.status === "queued") showJob(current);
+        if (myJob && myJob.status === "queued") showJob(myJob);
+        // our job ran between two polls (a short fake run, or the device went idle): its
+        // stream replays from the start, so watch it even if it has already finished
+        if (
+          myJob &&
+          !TERMINAL.includes(myJob.status) &&
+          (!s.busy || (s.current && s.current.job_id === myJob.job_id)) &&
+          (!current || current.job_id !== myJob.job_id)
+        )
+          watchRunning(myJob.job_id, true);
+      }
+      async function watchRunning(jobId, evenIfDone) {
+        if (pendingWatch === jobId || (current && current.job_id === jobId)) return;
+        pendingWatch = jobId;
+        try {
+          const j = await api("/api/jobs/" + jobId);
+          if (evenIfDone || !TERMINAL.includes(j.status)) watch(j);
+        } catch (e) {
+        } finally {
+          pendingWatch = null;
+        }
       }
       async function pollStatus() {
         try {
@@ -797,7 +833,10 @@
             body: JSON.stringify(body),
           });
           rememberJob(job.job_id);
-          watch(job);
+          myJob = job;
+          // queued behind a running job: keep that run on screen; the status poll switches to ours when it starts
+          if (devStatus && devStatus.busy) showJob(job);
+          else watch(job);
           pollStatus();
         } catch (e) {
           $("start-msg").textContent = e.message;
@@ -808,7 +847,7 @@
       function showJob(j) {
         const box = $("job");
         box.replaceChildren();
-        box.append(
+        const parts = [
           el("div", { text: j.job_id + " · " + j.status }),
           j.status === "queued"
             ? el("div", {
@@ -834,7 +873,8 @@
               " · ×" +
               j.repeat,
           }),
-        );
+        ];
+        box.append(...parts.filter(Boolean));
         if (j.run_ids.length) {
           const ul = el("ul", { class: "small" });
           j.run_ids.forEach((id) =>
@@ -873,7 +913,7 @@
             }),
           );
         $("cancel").hidden =
-          TERMINAL.includes(j.status) || !!j.cancel_requested;
+          TERMINAL.includes(j.status) || !!j.cancel_requested || !isMine(j);
         $("cancel").disabled = false;
       }
       // Hide the screenshot until a run's first step arrives (an img with
@@ -887,11 +927,14 @@
       function watch(job) {
         if (source) source.close();
         current = job;
-        showJob(job);
+        if (isMine(job)) myJob = job;
+        const mineShown = myJob && !TERMINAL.includes(myJob.status);
+        showJob(mineShown ? myJob : job);
         $("steps").replaceChildren();
         resetShot();
         $("run-title").textContent =
-          job.status === "queued" ? "Queued: waiting for the device…" : "Starting…";
+          (isMine(job) ? "" : "Watching the running job · ") +
+          (job.status === "queued" ? "Queued: waiting for the device…" : "Starting…");
         $("run-meta").textContent = "";
         source = new EventSource("/api/jobs/" + job.job_id + "/events");
         source.addEventListener("run_started", (e) => {
@@ -900,8 +943,9 @@
             ? current.run_ids
             : current.run_ids.concat(d.run_id);
           current.status = "running";
-          showJob(current);
-          $("run-title").textContent = taskLabel(d.task_id) + " · " + d.run_id;
+          if (isMine(current)) showJob(current);
+          $("run-title").textContent =
+            (isMine(current) ? "" : "Watching the running job · ") + taskLabel(d.task_id) + " · " + d.run_id;
           $("steps").replaceChildren(
             el("li", { class: "muted small", text: "Goal: " + d.goal }),
           );
@@ -963,6 +1007,7 @@
           $("steps").append(li);
         });
         source.addEventListener("confirmation", (e) => {
+          if (!isMine(current)) return; // another tester's confirmation is theirs to answer
           const d = JSON.parse(e.data);
           $("confirm-action").textContent = d.action;
           $("confirm-summary").textContent = JSON.stringify(d.summary, null, 2);
@@ -979,7 +1024,7 @@
           const d = JSON.parse(e.data);
           $("confirm").hidden = true;
           current.status = "running";
-          showJob(current);
+          if (isMine(current)) showJob(current);
           $("steps").append(
             el("li", {
               class: d.decision === "approve" ? "pass small" : "fail small",
@@ -1039,7 +1084,10 @@
         });
         source.addEventListener("job_done", (e) => {
           current = JSON.parse(e.data);
-          showJob(current);
+          if (isMine(current)) {
+            myJob = current;
+            showJob(current);
+          }
           if ($("shot").hidden)
             $("shot-empty").textContent =
               current.status === "cancelled" && !current.run_ids.length
@@ -1069,13 +1117,16 @@
         }
       }
       $("cancel").addEventListener("click", async () => {
-        if (!current) return;
+        const target = myJob || current;
+        if (!target) return;
         $("cancel").disabled = true;
         try {
-          current = await api("/api/jobs/" + current.job_id + "/cancel", {
+          const j = await api("/api/jobs/" + target.job_id + "/cancel", {
             method: "POST",
           });
-          showJob(current);
+          if (isMine(j)) myJob = j;
+          if (current && current.job_id === j.job_id) current = j;
+          showJob(j);
         } catch (e) {
           $("job").append(el("div", { class: "fail", text: e.message }));
         }
@@ -1570,7 +1621,11 @@
         const live = jobs.find(
           (j) => !TERMINAL.includes(j.status) && mine.includes(j.job_id),
         );
-        if (live) watch(live);
+        if (live) {
+          myJob = live;
+          if (live.status === "queued") showJob(live);
+          else watch(live);
+        }
       })();
     </script>
   </body>
