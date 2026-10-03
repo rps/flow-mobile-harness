@@ -4,7 +4,7 @@ Used instead of the tier-5 screen read-back for invoices when both
 INVOICE_NINJA_API_KEY and INVOICE_NINJA_ENDPOINT are set in os.environ (never
 read from .env by this module). The endpoint may be the bare host
 ("https://invoicing.co") or already end in /api/v1; base_url() normalises it.
-Verified live on 2026-10-03 against the hosted service (apps-probe/PROBE.md):
+Verified live on 2026-10-03 against the hosted service (owner's probe notes):
 
 - GET {base}/invoices?status=active,archived,deleted&per_page=N&page=P returns
   {"data": [...], "meta": {"pagination": {"total_pages": ...}}}. Without the

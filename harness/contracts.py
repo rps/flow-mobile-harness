@@ -50,7 +50,7 @@ class FlowType(StrEnum):
 
 
 class OracleTier(IntEnum):
-    """What a task's score rests on, strongest first (PRODUCT.md)."""
+    """What a task's score rests on, strongest first."""
 
     OWN_STORAGE = 1
     APP_EXPORT_API = 2

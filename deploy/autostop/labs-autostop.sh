@@ -9,7 +9,7 @@
 #
 # The VM has no service account, so `gcloud compute instances stop` cannot run
 # here; `shutdown -h now` makes GCE mark the instance TERMINATED, which ends
-# compute billing (disk billing continues). Verified in deploy/VM_STATE.md.
+# compute billing (disk billing continues). Verified on the VM (owner notes).
 set -u
 IDLE_MINUTES="${IDLE_MINUTES:-30}"
 RUNS_DIR="${RUNS_DIR:-}"

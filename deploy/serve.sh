@@ -3,7 +3,7 @@
 #   deploy/serve.sh start|stop|status|token|run|install-service
 # The UI token lives in ~/.config/labs/ui_token (0600), generated once on the VM
 # so it survives restarts. Reach the UI only through an ssh tunnel (IAP for the
-# owner, the reviewer account for testers; see RUNBOOK.md and REVIEWER.md).
+# owner, the reviewer account for testers; see README.md and REVIEWER.md).
 # `run` is the foreground form used by the systemd user service that
 # `install-service` sets up so the UI comes back on its own after a reboot.
 # Real runs need the API key: ~/.config/labs/env is loaded when present.

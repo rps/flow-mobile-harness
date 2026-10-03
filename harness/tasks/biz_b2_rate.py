@@ -3,7 +3,7 @@
 Oracle: tier 5, scripted read-back of the Insightly organisation record
 through BusinessInspector. The rate lives in the organisation's Description
 field ("Hourly rate: 95 USD per hour"); the mobile app cannot define custom
-fields, see apps-probe/PROBE.md. Not seeded: the expected rate is what
+fields, see the owner's probe notes. Not seeded: the expected rate is what
 Insightly shows before the run.
 Normalisation: note matched by title; the rate may be written as 95, 95.00
 or $95. Decoys on the snapshot: organisation "Northwind Logistics" (80) and a

@@ -9,7 +9,7 @@ from tests.fakes import FakeInspector
 
 
 def snapshot_biz_state() -> BizState:
-    """What snapshot `business` showed on 2026-10-02 (see apps-probe/PROBE.md)."""
+    """What snapshot `business` showed on 2026-10-02 (owner's probe notes)."""
     return BizState(
         project_hours={"Ideation": 5.0, CLIENT_ORG: 4.25, "Android Flow": 2.0},
         org_descriptions={CLIENT_ORG: "Hourly rate: 95 USD per hour", DECOY_ORG: "Hourly rate: 80 USD per hour"},

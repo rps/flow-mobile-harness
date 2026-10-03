@@ -1,6 +1,6 @@
 """Per-task run limits: steps, agent wall-clock seconds and model spend.
 
-Sized from the runs of 2026-10-02/03 (docs/benchmark-2026-10-02.md and the
+Sized from the runs of 2026-10-02/03 (the owner's benchmark notes and the
 runs/ directory): the step and spend caps are roughly twice what a passing
 run used, so a run stuck in an action loop stops well before the global
 budget feels it. The wall-clock caps are sized for the cloud VM, whose one

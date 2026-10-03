@@ -35,7 +35,7 @@ draft invoice in Invoice Ninja, checked through each vendor's API.
 ## Setup (once)
 
 ```sh
-cd /Users/rich/Desktop/labs
+cd labs                               # the clone
 python3 -m venv .venv                 # Python >= 3.12
 .venv/bin/pip install -e .            # deps come from pyproject.toml only
 ```
@@ -78,7 +78,7 @@ Runs are written under `runs/<run_id>/` (ignored).
 ## Tests
 
 ```sh
-cd /Users/rich/Desktop/labs
+cd labs
 PYTHONPATH=$PWD .venv/bin/python -m pytest -q
 ```
 

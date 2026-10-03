@@ -496,7 +496,7 @@ class JobManager:
         business tasks run on the business profile's emulator and everything
         else on the harness one; only one of the two is kept running, so the
         other is stopped first (the VM cannot run two real runs' worth of
-        emulators at once, deploy/VM_STATE.md)."""
+        emulators at once; measured on the VM)."""
         from harness import cli
 
         if req.fake:

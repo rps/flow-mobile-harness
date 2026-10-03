@@ -50,7 +50,7 @@ INSIGHTLY = "com.insightly.droid"
 INVOICE_NINJA = "com.invoiceninja.app"
 APPS = (TIMECAMP, INSIGHTLY, INVOICE_NINJA)
 
-# Fixed data on snapshot `business` (see apps-probe/PROBE.md, "Business snapshot").
+# Fixed data on snapshot `business` (owner's probe notes, "Business snapshot").
 CLIENT_ORG = "Northwind Traders"
 DECOY_ORG = "Northwind Logistics"
 ORGS_TO_READ = (CLIENT_ORG,)  # the decoy's rate is never checked; reading it cost ~30 s per run

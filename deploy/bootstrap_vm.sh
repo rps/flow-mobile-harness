@@ -138,7 +138,7 @@ cat >"$ENV_FILE" <<ENV
 export ANDROID_HOME="\${ANDROID_HOME:-$ANDROID_HOME}"
 export ANDROID_SDK_ROOT="\$ANDROID_HOME"
 export LABS_SYSTEM_IMAGE="\${LABS_SYSTEM_IMAGE:-$SYSTEM_IMAGE}"
-# The VM's one harness AVD (deploy/RUNBOOK.md §6b). Scripts derive LABS_DIR from their own location.
+# The VM's one harness AVD (see deploy/README.md). Scripts derive LABS_DIR from their own location.
 export LABS_AVD_NAME="\${LABS_AVD_NAME:-${LABS_AVD_NAME:-cloud_harness}}"
 export LABS_AVD_PORT="\${LABS_AVD_PORT:-${LABS_AVD_PORT:-5584}}"
 case ":\$PATH:" in *":\$ANDROID_HOME/platform-tools:"*) ;; *)
