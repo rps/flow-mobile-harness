@@ -1,0 +1,7 @@
+[Unit]
+Description=Shut the VM down when idle (labs harness)
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/labs-autostop
+ExecStart=/usr/local/sbin/labs-autostop.sh
