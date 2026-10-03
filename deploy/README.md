@@ -14,8 +14,9 @@ run one real scored task (see "API key"). Nothing here touches a Mac emulator.
 | `serve.sh start|stop|status|token` | VM | `harness.server` on 127.0.0.1:8765, `--fake-default`, stable token in `~/.config/labs/ui_token`; sources `~/labs-env.sh` and requires ANDROID_HOME + LABS_AVD_NAME/PORT/SYSTEM_IMAGE |
 | `check_emulator.sh` | VM | Throwaway AVD `cloud_check` on 5586: headless boot, adb root, iptables REJECT of 10.0.2.2, loopback probe, snapshot save/load timing; deletes the AVD |
 | `autostop/` | VM | systemd timer running `shutdown -h now` after IDLE_MINUTES without ssh connections or runs-dir writes; `install.sh` |
-| `RUNBOOK.md` | | start, push, bootstrap, test, serve, tunnel, harness baseline AVD (§6b), emulator check, auto-stop, stop, real runs with the key (§10) |
+| `RUNBOOK.md` | | start, push, bootstrap, test, serve, tunnel, harness baseline AVD (§6b), emulator check, auto-stop, stop, real runs with the key (§10), business profile on the VM (§11) |
 | `VM_STATE.md` | | inventory, reuse/replace decisions, measured results, timeline |
+| AVD `cloud_business` (VM only, not a file) | VM | Play image `android-36.1;google_apis_playstore;x86_64`, port 5586, snapshot `business`: test Google account, TimeCamp + Insightly from Play, Invoice Ninja F-Droid APK, Markor; record in `~/.config/labs/business.json`. Selected with `LABS_BUSINESS_*` (RUNBOOK §11) |
 
 Decisions: Python 3.12 via deadsnakes rather than uv (no new tool on the VM, apt-managed, pyproject
 untouched). SDK reused from the owner's smoke-test install rather than replaced (same packages the
@@ -28,7 +29,7 @@ harness needs, 5.4 GB already on disk). The VM has no service account, so auto-s
 - **B's restore retry, batched seeding and redaction** are merged. One real run on the VM completed with baseline restore and seeding inside a 224 s CLI total (182 s of it agent time); seeding was not timed separately and restore-retry was not triggered, so both remain **unverified** as individual numbers.
 - **C's cancel** is merged. At ccaacd4 three cancel tests in tests/test_server_phase2.py failed on both the Mac and the VM (3 failed, 287 passed); fixed on main at e63e7dc. Two emulators at once used about 360% of 400% CPU, so two concurrent real runs on n2-standard-4 are likely CPU-bound (**unverified** for real runs).
 - **A, sample-app provisioning**: `provision_sample_app.py` needs an x86_64-capable build of the sample app (BUILD.md builds for the Mac's arm64 AVD; a debug APK is multi-ABI only if its native deps are, **unverified**). Not run on the VM.
-- **D, x86 business apps** (ABI results from area D, apps-probe/PROBE.md on D's branch, not re-checked here): TimeCamp (com.timecamp.mobile) and Insightly (com.insightly.droid) ship universal base APKs with x86_64 libs, so they install on the VM image as-is. Invoice Ninja (com.invoiceninja.app) from Play is split (base + config.arm64_v8a + locale/density); Play should serve a config.x86_64 split on an x86 device, **unverified**; the F-Droid APK in apps-probe/apks is universal with x86_64 and works. Play Store itself needs the `google_apis_playstore;x86_64` image (listed by sdkmanager, not installed here) and a Google account sign-in on the VM, which is an owner decision.
+- **D, x86 business apps** (ABI results from area D, apps-probe/PROBE.md on D's branch, not re-checked here): TimeCamp (com.timecamp.mobile) and Insightly (com.insightly.droid) ship universal base APKs with x86_64 libs, so they install on the VM image as-is. Invoice Ninja (com.invoiceninja.app) from Play is split (base + config.arm64_v8a + locale/density); Play should serve a config.x86_64 split on an x86 device, **unverified**; the F-Droid APK in apps-probe/apks is universal with x86_64 and works. Play Store itself needs the `google_apis_playstore;x86_64` image (listed by sdkmanager, not installed here) and a Google account sign-in on the VM, which is an owner decision. **Update 2026-10-03:** done. The image is installed and the AVD `cloud_business` holds the test Google account, TimeCamp and Insightly from Play (x86_64 libs selected), Invoice Ninja from the F-Droid APK, and Markor (RUNBOOK §11, VM_STATE.md round 5). Google showed no device-verification prompt on the cloud machine.
 
 ## Multiple testers
 
@@ -47,7 +48,7 @@ tester's run waits in the queue.
 
 ## API key
 
-Since 2026-10-03 the Mac's key is on the VM in `~/.config/labs/env` (0600) with HARNESS_BUDGET_USD=10,
+Since 2026-10-03 the Mac's key is on the VM in `~/.config/labs/env` (0600) with HARNESS_BUDGET_USD=60 (was 10; owner decision 2026-10-03) and the two Invoice Ninja API variables,
 by owner decision. RUNBOOK.md §10 has the run command, the refresh and the removal steps. The first real
 scored run on the VM (a_markor_note) passed with the same 16 steps and ~$0.38 as the Mac runs; its agent
 wall time was 182 s against 102-142 s for the nine Mac runs, a single sample (VM_STATE.md round 3).

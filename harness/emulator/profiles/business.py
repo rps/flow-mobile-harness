@@ -30,7 +30,7 @@ client's earlier invoices before a biz_d_invoice run, recording them in
 meta["invoice_cleanup"]; meta["oracle"] says which oracle each value came from.
 
 CLI: python -m harness.emulator.profiles.business
-     {start,stop,restore,status,record-baseline,env,cleanup-invoices}
+     {start,stop,restore,status,record-baseline,env,cleanup-invoices,readback}
 """
 
 from __future__ import annotations
@@ -50,14 +50,18 @@ from harness.device.adb_shell import adb, shell
 
 log = logging.getLogger(__name__)
 
-AVD_NAME = "p2_business_play"
-PORT = 5592
+# Defaults are the Mac's AVD. A host with its own business AVD (the cloud VM)
+# overrides them with LABS_BUSINESS_* (deliberately not LABS_AVD_*, which
+# ~/labs-env.sh exports for the harness AVD) and keeps its record outside the
+# checkout via LABS_BUSINESS_BASELINE.
+AVD_NAME = os.environ.get("LABS_BUSINESS_AVD_NAME", "p2_business_play")
+PORT = int(os.environ.get("LABS_BUSINESS_AVD_PORT", "5592"))
 SERIAL = f"emulator-{PORT}"
 SNAPSHOT = "business"
-SYSTEM_IMAGE = "system-images;android-36.1;google_apis_playstore;arm64-v8a"
+SYSTEM_IMAGE = os.environ.get("LABS_BUSINESS_SYSTEM_IMAGE", "system-images;android-36.1;google_apis_playstore;arm64-v8a")
 FREEFORM_ALLOWED = False
 HERE = Path(__file__).resolve().parent
-BASELINE_JSON = HERE / "business.json"
+BASELINE_JSON = Path(os.environ.get("LABS_BUSINESS_BASELINE") or HERE / "business.json").expanduser()
 SCORED_BLOCKED_PACKAGES = ("com.android.vending",)
 ENV = {"LABS_AVD_NAME": AVD_NAME, "LABS_AVD_PORT": str(PORT), "LABS_SYSTEM_IMAGE": SYSTEM_IMAGE}
 ENV_PREFIX = " ".join(f"{k}={shlex.quote(v)}" for k, v in ENV.items())
@@ -206,6 +210,29 @@ def cleanup_invoices(api=None) -> dict:
     return biz_api.cleanup_client_invoices(api, CLIENT_ORG)
 
 
+def readback(api=None, reader=None) -> dict:
+    """The values the business verifiers read, without an agent run: TimeCamp
+    hours for the fixed range, the client's Insightly description, and the
+    invoices (from the API when configured, else from the screen)."""
+    from dataclasses import asdict
+
+    from harness.verify import biz_api
+    from harness.verify.biz_readback import ORGS_TO_READ, REPORT_END, REPORT_START, BizReadback
+
+    reader = reader if reader is not None else BizReadback(SERIAL)
+    api = api if api is not None else biz_api.from_env()
+    out = {"range": f"{REPORT_START.isoformat()}..{REPORT_END.isoformat()}",
+           "hours": reader.timecamp_project_hours(),
+           "org_descriptions": {org: reader.insightly_org_description(org) for org in ORGS_TO_READ}}
+    if api is not None:
+        invoices, complete, source = api.invoices(), True, "invoice_ninja_api"
+    else:
+        (invoices, complete), source = reader.invoice_ninja_invoices(), "invoice_ninja_screen_readback"
+    out.update(invoices_oracle=source, invoices_complete=complete,
+               invoices={n: asdict(inv) for n, inv in sorted(invoices.items())})
+    return out
+
+
 def oracle_meta(api) -> dict:
     """Which oracle each business value comes from, for run meta."""
     from harness.verify.biz_readback import REPORT_END, REPORT_START
@@ -294,7 +321,7 @@ def run_scored(task_id: str, config, confirm_policy, store, *, windowed: bool = 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="python -m harness.emulator.profiles.business")
     p.add_argument("command", choices=["start", "stop", "restore", "status", "record-baseline", "env",
-                                       "cleanup-invoices"])
+                                       "cleanup-invoices", "readback"])
     p.add_argument("--no-window", action="store_true", help="boot headless (default is windowed)")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -313,6 +340,8 @@ def main(argv: list[str] | None = None) -> None:
         print(ENV_PREFIX)
     elif a.command == "cleanup-invoices":
         print(json.dumps(cleanup_invoices(), indent=2))
+    elif a.command == "readback":
+        print(json.dumps(readback(), indent=2))
 
 
 if __name__ == "__main__":

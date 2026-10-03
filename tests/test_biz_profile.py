@@ -8,6 +8,18 @@ from harness.emulator.profiles import business
 from harness.emulator.profiles.business import ProfileError
 
 
+@pytest.fixture(autouse=True)
+def _mac_profile(monkeypatch):
+    """These tests describe the committed (Mac) profile. A shell that exports
+    LABS_BUSINESS_* (the cloud VM's $BIZ) rebinds the module at import, so pin
+    the defaults in-process; the override tests use a fresh interpreter."""
+    image = "system-images;android-36.1;google_apis_playstore;arm64-v8a"
+    for name, value in (("AVD_NAME", "p2_business_play"), ("PORT", 5592), ("SERIAL", "emulator-5592"),
+                        ("SYSTEM_IMAGE", image), ("BASELINE_JSON", business.HERE / "business.json"),
+                        ("ENV", {"LABS_AVD_NAME": "p2_business_play", "LABS_AVD_PORT": "5592", "LABS_SYSTEM_IMAGE": image})):
+        monkeypatch.setattr(business, name, value)
+
+
 def _good() -> dict:
     return {"avd": business.AVD_NAME, "serial": business.SERIAL, "snapshot": business.SNAPSHOT,
             "freeform_allowed": False, "host_loopback_blocked": False, "root": False}
@@ -117,10 +129,12 @@ def test_manager_binding_refuses_a_manager_bound_elsewhere(monkeypatch):
 
 
 def test_env_prefix_names_every_override():
-    assert business.ENV_PREFIX == ("LABS_AVD_NAME=p2_business_play LABS_AVD_PORT=5592 "
-                                   "LABS_SYSTEM_IMAGE='system-images;android-36.1;google_apis_playstore;arm64-v8a'")
     import shlex
-    assert dict(kv.split("=", 1) for kv in shlex.split(business.ENV_PREFIX)) == business.ENV
+
+    prefix, env = _import_profile_attrs(["ENV_PREFIX", "ENV"], {})  # Mac defaults, whatever the shell exports
+    assert prefix == ("LABS_AVD_NAME=p2_business_play LABS_AVD_PORT=5592 "
+                      "LABS_SYSTEM_IMAGE='system-images;android-36.1;google_apis_playstore;arm64-v8a'")
+    assert dict(kv.split("=", 1) for kv in shlex.split(prefix)) == env
 
 
 # --- Invoice oracle and the biz_d cleanup -----------------------------------------
@@ -314,3 +328,140 @@ def test_cleanup_invoices_needs_the_api_and_the_cli_prints_the_result(monkeypatc
     business.main(["cleanup-invoices"])
     out = json.loads(capsys.readouterr().out)
     assert out["client"] == "Northwind Traders" and [r["number_after"] for r in out["removed"]] == ["0002_Deleted"]
+
+
+# --- Host overrides (the cloud VM's own business AVD) and the read-back CLI ------
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from harness.verify.biz_readback import Invoice, LineItem  # noqa: E402
+
+_PROBE = ("import json; from harness.emulator.profiles import business as b; "
+          "print(json.dumps([b.AVD_NAME, b.PORT, b.SERIAL, b.SYSTEM_IMAGE, str(b.BASELINE_JSON), b.ENV]))")
+
+
+def _import_profile(env_overrides: dict, probe: str = _PROBE) -> list:
+    """Import the profile in a fresh interpreter (the constants are read at import)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LABS_BUSINESS_", "LABS_AVD_", "LABS_SYSTEM_"))}
+    env.update(env_overrides, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    out = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+def _import_profile_attrs(names: list, env_overrides: dict) -> list:
+    probe = ("import json; from harness.emulator.profiles import business as b; "
+             f"print(json.dumps([getattr(b, n) for n in {names!r}]))")
+    return _import_profile(env_overrides, probe)
+
+
+def test_profile_defaults_are_the_macs_avd_and_ignore_the_harness_avd_variables():
+    name, port, serial, image, baseline, env = _import_profile(
+        {"LABS_AVD_NAME": "cloud_harness", "LABS_AVD_PORT": "5584",
+         "LABS_SYSTEM_IMAGE": "system-images;android-36.1;google_apis;x86_64"})
+    assert (name, port, serial) == ("p2_business_play", 5592, "emulator-5592")
+    assert image == "system-images;android-36.1;google_apis_playstore;arm64-v8a"
+    assert baseline == str(business.HERE / "business.json")
+    assert env["LABS_AVD_NAME"] == "p2_business_play"  # what manager() exports, not the shell's cloud_harness
+
+
+def test_business_variables_rebind_avd_serial_image_and_record(tmp_path):
+    record = tmp_path / "vm_business.json"
+    name, port, serial, image, baseline, env = _import_profile(
+        {"LABS_BUSINESS_AVD_NAME": "cloud_business", "LABS_BUSINESS_AVD_PORT": "5586",
+         "LABS_BUSINESS_SYSTEM_IMAGE": "system-images;android-36.1;google_apis_playstore;x86_64",
+         "LABS_BUSINESS_BASELINE": str(record)})
+    assert (name, port, serial, baseline) == ("cloud_business", 5586, "emulator-5586", str(record))
+    assert env == {"LABS_AVD_NAME": "cloud_business", "LABS_AVD_PORT": "5586",
+                   "LABS_SYSTEM_IMAGE": "system-images;android-36.1;google_apis_playstore;x86_64"}
+
+
+def test_business_baseline_path_expands_home_and_empty_falls_back_to_the_committed_record():
+    assert _import_profile({"LABS_BUSINESS_BASELINE": "~/x/business.json"})[4] == str(Path.home() / "x/business.json")
+    assert _import_profile({"LABS_BUSINESS_BASELINE": ""})[4] == str(business.HERE / "business.json")
+
+
+def test_non_integer_business_port_fails_at_import():
+    with pytest.raises(subprocess.CalledProcessError) as exc:
+        _import_profile({"LABS_BUSINESS_AVD_PORT": "fifty"})
+    assert "invalid literal for int" in exc.value.stderr
+
+
+def test_record_from_another_avd_is_refused_under_the_mac_defaults(tmp_path):
+    """A VM record (cloud_business) must never validate on a host bound to p2_business_play."""
+    info = dict(_good(), avd="cloud_business", serial="emulator-5586")
+    path = tmp_path / "vm_business.json"
+    path.write_text(json.dumps(info))
+    with pytest.raises(ProfileError, match="avd='cloud_business'"):
+        business.baseline_info(path)
+
+
+class _FakeReader:
+    def __init__(self, invoices=None):
+        self.calls = []
+        self._invoices = invoices or {}
+
+    def timecamp_project_hours(self):
+        self.calls.append("hours")
+        return {"Northwind Traders": 4.25, "Ideation": 5.0}
+
+    def insightly_org_description(self, org):
+        self.calls.append(("org", org))
+        return "Hourly rate: 95 USD per hour"
+
+    def invoice_ninja_invoices(self, known=None):
+        self.calls.append("invoices")
+        return self._invoices, False
+
+
+def test_readback_takes_invoices_from_the_api_when_configured_and_never_opens_the_app():
+    reader = _FakeReader()
+    api = biz_api.InvoiceNinjaApi(API_ROOT, "tok", opener=_server())
+    out = business.readback(api=api, reader=reader)
+    assert out["range"] == "2026-09-28..2026-10-03"
+    assert out["hours"]["Northwind Traders"] == 4.25
+    assert out["org_descriptions"] == {"Northwind Traders": "Hourly rate: 95 USD per hour"}
+    assert out["invoices_oracle"] == "invoice_ninja_api" and out["invoices_complete"] is True
+    assert sorted(out["invoices"]) == ["0001_Deleted", "0002", "0003"]
+    assert out["invoices"]["0002"]["client"] == "Northwind Traders" and out["invoices"]["0001_Deleted"]["state"] == "Deleted"
+    assert "invoices" not in reader.calls
+
+
+def test_readback_without_the_api_reads_the_screen_and_reports_an_incomplete_scan(monkeypatch):
+    monkeypatch.setattr(biz_api, "from_env", lambda environ=None: None)
+    inv = Invoice("0004", "Northwind Traders", 403.75, "Draft", "10/03/2026", (LineItem("Consulting hours", 403.75, 4.25, 95.0),))
+    reader = _FakeReader({"0004": inv})
+    out = business.readback(reader=reader)
+    assert out["invoices_oracle"] == "invoice_ninja_screen_readback" and out["invoices_complete"] is False
+    assert out["invoices"]["0004"]["items"][0] == {"name": "Consulting hours", "total": 403.75, "quantity": 4.25, "unit_cost": 95.0}
+    assert reader.calls == ["hours", ("org", "Northwind Traders"), "invoices"]
+
+
+def test_readback_api_error_propagates_instead_of_falling_back_to_the_screen():
+    reader = _FakeReader()
+    api = biz_api.InvoiceNinjaApi(API_ROOT, "tok", opener=FakeInvoiceServer([], [], fail={"/api/v1/clients": 500}))
+    with pytest.raises(biz_api.InvoiceNinjaError, match="HTTP 500"):
+        business.readback(api=api, reader=reader)
+    assert "invoices" not in reader.calls
+
+
+def test_readback_cli_reads_the_profile_serial_and_prints_json(monkeypatch, capsys):
+    """The CLI path builds its own BizReadback on the (possibly overridden) SERIAL."""
+    from harness.verify import biz_readback
+
+    serials = []
+
+    class Reader(_FakeReader):
+        def __init__(self, serial, settle_s=1.0):
+            serials.append(serial)
+            super().__init__()
+
+    monkeypatch.setattr(business, "SERIAL", "emulator-5586")
+    monkeypatch.setattr(biz_readback, "BizReadback", Reader)
+    monkeypatch.setattr(biz_api, "from_env", lambda environ=None: None)
+    business.main(["readback"])
+    out = json.loads(capsys.readouterr().out)
+    assert serials == ["emulator-5586"]
+    assert out["hours"]["Northwind Traders"] == 4.25 and out["invoices_oracle"] == "invoice_ninja_screen_readback"

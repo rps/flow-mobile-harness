@@ -5,6 +5,8 @@
 Runs from a worktree: the harness code is the worktree's, while .env and the
 runs/ directory are the repo root's (LABS_REPO_ROOT, default: the parent of
 this checkout's apps-probe/ when it is the main checkout, else set it).
+Without a .env (the cloud VM) the config comes from the environment, which
+must then carry ANTHROPIC_API_KEY.
 Goes through business.run_scored(), which pins the profile's baseline JSON
 and refuses freeform goals.
 """
@@ -35,9 +37,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int)
     p.add_argument("--no-window", action="store_true")
     a = p.parse_args(argv)
-    if not (REPO_ROOT / ".env").exists():
-        sys.exit(f"no .env under {REPO_ROOT}; set LABS_REPO_ROOT to the main checkout")
-    config = Config.from_env(env_file=REPO_ROOT / ".env", environ={"HARNESS_RUNS_DIR": str(REPO_ROOT / "runs")})
+    runs = {"HARNESS_RUNS_DIR": str(REPO_ROOT / "runs")}
+    if (REPO_ROOT / ".env").exists():
+        config = Config.from_env(env_file=REPO_ROOT / ".env", environ=runs)
+    elif os.environ.get("ANTHROPIC_API_KEY"):  # a host without .env (the cloud VM) exports the key in the shell
+        config = Config.from_env(env_file=None, environ={**os.environ, **runs})
+    else:
+        sys.exit(f"no .env under {REPO_ROOT} and no ANTHROPIC_API_KEY in the environment; "
+                 "set LABS_REPO_ROOT to the main checkout")
     store = TraceStore(config.runs_dir)
     run = business.run_scored(a.task, config, a.confirm, store, windowed=not a.no_window, seed=a.seed,
                               meta={"worktree": str(HERE)})
