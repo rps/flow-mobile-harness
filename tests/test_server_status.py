@@ -76,7 +76,7 @@ def test_busy_with_one_queued_shows_holder_name_steps_and_queue(srv):
     started = datetime.fromisoformat(c["started_at"])
     assert started.tzinfo is not None and abs((datetime.now(timezone.utc) - started).total_seconds()) < 60
     assert s["queue"] == [{"job_id": queued["job_id"], "task_id": "a_markor_note",
-                           "requested_by_hint": "another tester"}]
+                           "requested_by_hint": "Anthropic Reviewer"}]
     assert s["estimated_wait_s"] is None  # no non-fake history
 
     _answer(srv, blocker["job_id"], "approve")
@@ -99,7 +99,7 @@ def test_unnamed_freeform_job_shows_defaults(tmp_path):
         job = _start(s, goal="Open Markor", policy="ui")  # fake freeform runs pause on a confirmation
         _wait_pending(s, job["job_id"])
         c = _status(s)["current"]
-        assert c["task_id"] == "freeform" and c["requested_by_hint"] == "another tester"
+        assert c["task_id"] == "freeform" and c["requested_by_hint"] == "Anthropic Reviewer"
         _answer(s, job["job_id"], "reject")
         _wait_idle(s)
     finally:

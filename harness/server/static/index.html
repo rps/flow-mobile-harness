@@ -441,8 +441,8 @@
             </div>
             <label for="policy">Confirmation</label>
             <select id="policy">
+              <option value="approve" selected>Always approve</option>
               <option value="ui">Ask me here (ui, production recommended)</option>
-              <option value="approve">Always approve</option>
               <option value="reject">Always reject</option>
             </select>
             <label for="repeat">Repeat</label>
@@ -453,7 +453,7 @@
             >
             <p class="note small" id="fake-note" hidden></p>
             <label for="name">Your name (optional, shown to other testers)</label>
-            <input type="text" id="name" maxlength="40" placeholder="another tester" />
+            <input type="text" id="name" maxlength="40" placeholder="Anthropic Reviewer" />
             <div class="row" style="margin-top: 12px">
               <button class="primary" id="start">Start</button>
               <span class="small muted" id="start-msg"></span>

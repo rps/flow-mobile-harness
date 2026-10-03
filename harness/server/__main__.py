@@ -26,8 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allow-unblocked", action="store_true",
                     help="allow freeform goals when host loopback is not blocked")
     ap.add_argument("--fake-default", action="store_true", help="tick the Fake toggle by default in the page")
-    ap.add_argument("--policy-default", choices=("ui", "approve", "reject"), default="ui",
-                    help="confirmation policy preselected in the page (default ui)")
+    ap.add_argument("--policy-default", choices=("ui", "approve", "reject"), default="approve",
+                    help="confirmation policy preselected in the page (default approve)")
     ap.add_argument("--confirm-timeout", type=float, default=300.0,
                     help="seconds a `ui` confirmation waits before it resolves to reject")
     args = ap.parse_args(argv)

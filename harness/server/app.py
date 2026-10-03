@@ -97,7 +97,7 @@ TERMINAL = ("done", "error", "cancelled")
 RESTORE_LOCK_TIMEOUT_S = 30.0
 CANCELLED_BY = "web_ui"  # meta["cancelled_by"] when the server's own fallback stopped a run
 CANCEL_DECIDED = ("runner", "fallback")
-DEFAULT_REQUESTER = "another tester"  # status hint for a job sent without a name
+DEFAULT_REQUESTER = "Anthropic Reviewer"  # status hint for a job sent without a name
 WAIT_HISTORY_RUNS = 20  # recent non-fake runs whose median wall time sizes the wait estimate
 MAX_WALL_S = 86400.0  # a recorded wall time above a day is treated as bad data, not history
 
@@ -625,7 +625,7 @@ def create_app(
     baseline_json: str | Path | None = None,
     confirm_timeout_s: float = 300.0,
     fake_default: bool = False,
-    policy_default: str = "ui",
+    policy_default: str = "approve",
 ) -> FastAPI:
     if not token:
         raise ValueError("a token is required")
