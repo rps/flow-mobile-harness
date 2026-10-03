@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from harness.contracts import RunRecord, Verdict
+from harness.contracts import FlowType, RunRecord, Verdict
 from harness.tasks import registry
 from harness.trace.store import RUN_FILE
 
@@ -94,13 +94,23 @@ def _mean(values: list[float]) -> dict[str, Any]:
     return {"mean": None if not values else sum(values) / len(values), "n": len(values)}
 
 
+def _expected_verdict(run: RunRecord) -> Verdict:
+    """Same rule as harness.verify.runner.expected_verdict, from the run's own
+    flow type: INFEASIBLE for a flow-H task, DONE otherwise."""
+    return Verdict.INFEASIBLE if run.flow_type is FlowType.H else Verdict.DONE
+
+
 def summarise(runs: list[RunRecord], tags: dict[str, list[str]] | None = None) -> dict[str, Any]:
-    """Counts and rates for one group of runs; `tags` maps run_id to its failure tags."""
+    """Counts and rates for one group of runs; `tags` maps run_id to its failure tags.
+
+    false_success: the agent gave the task's expected verdict but the verifier
+    failed; false_failure: the verifier passed but the agent did not give the
+    expected verdict. Both are the runs where self_report_agrees is false."""
     verified = [r for r in runs if r.verifier_result is not None]
     passed = sum(r.verifier_result.passed for r in verified)
     said_done = sum(r.agent_verdict == Verdict.DONE for r in runs)
-    false_success = sum(r.agent_verdict == Verdict.DONE and not r.verifier_result.passed for r in verified)
-    false_failure = sum(r.agent_verdict != Verdict.DONE and r.verifier_result.passed for r in verified)
+    false_success = sum(r.agent_verdict == _expected_verdict(r) and not r.verifier_result.passed for r in verified)
+    false_failure = sum(r.agent_verdict != _expected_verdict(r) and r.verifier_result.passed for r in verified)
     return {
         "runs": len(runs),
         "verified_runs": len(verified),

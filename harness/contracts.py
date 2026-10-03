@@ -256,6 +256,7 @@ class StepRecord:
     ui_tree_path: str | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
     duration_ms: int = 0
+    meta: dict[str, Any] = field(default_factory=dict)  # harness measurements, e.g. settle_s; never shown to the agent
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
@@ -274,6 +275,7 @@ class StepRecord:
             ui_tree_path=d.get("ui_tree_path"),
             usage=TokenUsage.from_dict(d.get("usage", {})),
             duration_ms=d.get("duration_ms", 0),
+            meta=dict(d.get("meta", {})),
         )
 
 

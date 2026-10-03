@@ -47,6 +47,8 @@ OnStep = Callable[[StepRecord, bytes | None, str | None], None]
 
 REASONING_MAX_CHARS = 2000
 _EPHEMERAL = {"type": "ephemeral"}
+# Tools that can change the screen; after a successful one the device settles.
+UI_ACTIONS = frozenset({"tap", "type_text", "swipe", "back", "home", "open_app"})
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class AgentSettings:
     max_confirm_rerequests: int = 2
     no_tool_call_retries: int = 2
     allow_unpriced: bool = False
+    settle_max_s: float = 8.0  # cap on waiting for the UI to settle after an action
 
     @property
     def reserve_usd(self) -> float:
@@ -214,6 +217,28 @@ class _Run:
                 if attempt + 1 == attempts:
                     raise _Stop(TerminationReason.ERROR, f"device error during {what}: {e}") from e
 
+    def settle(self) -> dict[str, Any]:
+        """Wait for the UI to settle after an action, if the device can.
+        Returns step meta: settle_s, plus the device's reason when it settles."""
+        fn = getattr(self.device, "settle", None)
+        if fn is None:
+            return {"settle_s": 0.0}
+        t0 = time.monotonic()
+        try:
+            result = fn(max_s=max(0.0, min(self.s.settle_max_s, self.remaining_s())))
+        except DeviceError as e:  # observing anyway beats ending the run
+            log.warning("settle failed: %s", e)
+            result = None
+            reason: str | None = "error"
+        else:
+            if result is None:  # a wrapper over a device without settle
+                return {"settle_s": 0.0}
+            reason = getattr(result, "reason", None)
+        meta: dict[str, Any] = {"settle_s": round(time.monotonic() - t0, 3)}
+        if reason is not None:
+            meta["settle"] = reason
+        return meta
+
     def observe(self) -> _Observation:
         self.check_time()
         shot = self.with_retries("screenshot", self.device.screenshot)
@@ -360,6 +385,7 @@ class _Run:
 
         result: dict[str, Any]
         model_extra: list[str] = []
+        meta: dict[str, Any] = {}
         is_error = False
         finish: tuple[Verdict, str] | None = None
 
@@ -378,6 +404,8 @@ class _Run:
             try:
                 result = execute(self.device, name, tool_input)
                 self.device_errors = 0
+                if name in UI_ACTIONS:
+                    meta = self.settle()
             except QueryNotAllowed as e:
                 result = {"error": str(e), "allowed_queries": self.device.allowed_queries()}
                 is_error = True
@@ -400,6 +428,7 @@ class _Run:
             reasoning=_reasoning_of(response.content),
             usage=step_usage,
             duration_ms=int((time.monotonic() - t0) * 1000),
+            meta=meta,
         )
         try:
             self.on_step(record, obs.screenshot.png, obs.ui_tree)

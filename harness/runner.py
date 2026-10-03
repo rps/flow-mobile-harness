@@ -204,6 +204,16 @@ class _GatedDevice:
     def ui_tree(self) -> str:
         return self._live().ui_tree()
 
+    def settle(self, max_s: float) -> Any:
+        """Forward the optional settle (None if the device has none); the gate
+        is checked before and again after the wait."""
+        fn = getattr(self._live(), "settle", None)
+        if fn is None:
+            return None
+        result = fn(max_s=max_s)
+        self._live()
+        return result
+
     def tap(self, x: int, y: int) -> None:
         self._live().tap(x, y)
 

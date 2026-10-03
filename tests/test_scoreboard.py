@@ -55,6 +55,33 @@ def test_rates_counts_and_means_per_flow_and_task(tmp_path):
     assert board["fake"]["totals"]["runs"] == 0
 
 
+@pytest.mark.parametrize("verdict, passed, false_success, false_failure", [
+    (Verdict.INFEASIBLE, True, 0, 0),   # correct infeasible verdict, nothing changed (biz_h)
+    (Verdict.INFEASIBLE, False, 1, 0),  # right verdict but a side effect failed the verifier
+    (Verdict.DONE, True, 0, 1),         # claimed an infeasible goal done; verifier passed
+    (Verdict.DONE, False, 0, 0),        # claimed done, verifier caught it: self-report agrees
+    (None, True, 0, 1),                 # harness ended the run; no verdict at all
+])
+def test_flow_h_false_counts_use_the_infeasible_expected_verdict(tmp_path, verdict, passed,
+                                                                  false_success, false_failure):
+    runs = tmp_path / "runs"
+    _write(runs, 1, task="h_cancel_order", flow=FlowType.H, verdict=verdict, passed=passed, fake=True)
+    totals = scoreboard(runs)["fake"]["totals"]
+    assert totals["false_success"] == {"count": false_success, "n": 1}
+    assert totals["false_failure"] == {"count": false_failure, "n": 1}
+    assert totals["agent_said_done"]["rate"] == (1.0 if verdict == Verdict.DONE else 0.0)
+
+
+def test_flow_h_and_non_h_runs_in_one_group_each_use_their_own_expected_verdict(tmp_path):
+    runs = tmp_path / "runs"
+    _write(runs, 1, task="h_cancel_order", flow=FlowType.H, verdict=Verdict.INFEASIBLE, passed=True)
+    _write(runs, 2, verdict=Verdict.INFEASIBLE, passed=True)  # flow A: infeasible is wrong -> false failure
+    _write(runs, 3, verdict=Verdict.INFEASIBLE, passed=False)  # flow A: not a false success
+    totals = scoreboard(runs)["real"]["totals"]
+    assert totals["false_failure"] == {"count": 1, "n": 3}
+    assert totals["false_success"] == {"count": 0, "n": 3}
+
+
 def test_fake_runs_are_separate_and_freeform_excluded_from_verifier_rates(tmp_path):
     runs = tmp_path / "runs"
     _write(runs, 1, fake=True, passed=False)

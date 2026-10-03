@@ -871,3 +871,49 @@ def test_non_retryable_restore_error_skips_the_cold_boot(tmp_path, monkeypatch):
     assert run.termination_reason is TerminationReason.ERROR
     assert "stop" not in rec.log and "restore_retry" not in run.meta
     assert run.meta["error"].startswith("restore: DeviceError: snapshot 'baseline' does not exist")
+
+
+class _SettleDevice(FakeDevice):
+    def __init__(self, during=None):
+        super().__init__()
+        self.during = during
+        self.settles = []
+
+    def settle(self, max_s):
+        self.settles.append(max_s)
+        if self.during:
+            self.during()
+        return "settled"
+
+
+def test_gated_device_forwards_settle_to_a_device_that_has_it():
+    inner = _SettleDevice()
+    gated = runner._GatedDevice(inner)
+    assert gated.settle(max_s=8.0) == "settled"
+    assert inner.settles == [8.0]
+
+
+def test_gated_device_settle_is_none_for_a_device_without_it():
+    assert runner._GatedDevice(FakeDevice()).settle(max_s=8.0) is None
+
+
+def test_gated_device_settle_refuses_after_cancel_and_close():
+    inner = _SettleDevice()
+    gated = runner._GatedDevice(inner)
+    gated.cancel()
+    with pytest.raises(runner.RunCancelled):
+        gated.settle(max_s=8.0)
+    closed = runner._GatedDevice(inner)
+    closed.close()
+    with pytest.raises(DeviceError):
+        closed.settle(max_s=8.0)
+    assert inner.settles == []
+
+
+def test_cancel_during_settle_raises_when_the_wait_returns():
+    holder = {}
+    inner = _SettleDevice(during=lambda: holder["gated"].cancel())
+    holder["gated"] = runner._GatedDevice(inner)
+    with pytest.raises(runner.RunCancelled):
+        holder["gated"].settle(max_s=8.0)
+    assert inner.settles == [8.0]

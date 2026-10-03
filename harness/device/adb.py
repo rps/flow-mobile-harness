@@ -10,6 +10,8 @@ import io
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -56,6 +58,97 @@ QUERIES: dict[str, tuple[str, list[str], str | None, str | None]] = {
 }
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
+
+# Settling after an action. On p2_harness_api36 a cold app start leaves
+# mCurrentFocus=null for about 5 s while the old dump still shows the launcher.
+SETTLE_MIN_WAIT_S = 0.3  # let a transition begin before the first focus read
+SETTLE_POLL_S = 0.15
+SETTLE_MAX_S = 8.0  # a cold Jetsnack start takes focus 5.7-6.1 s after the tap
+FOCUS_RE = re.compile(r"mCurrentFocus=(.*)")
+WINDOW_PACKAGE_RE = re.compile(r"\bu\d+ ([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)[/}]")
+
+
+@dataclass(frozen=True)
+class SettleResult:
+    seconds: float
+    reason: str  # "stable", "focus_only" or "cap"
+    tree: str | None = None  # the stable dump; None for focus_only and cap
+    focus: str | None = None  # the focused window settling ended on; on cap the last read (None if null)
+
+
+def window_package(focus: str) -> str | None:
+    """Package of a focused-window description such as
+    `Window{594f243 u0 com.labs.snackorders/com.example.MainActivity}`; None
+    for windows named without one (NotificationShade, PopupWindow:...)."""
+    m = WINDOW_PACKAGE_RE.search(focus)
+    return m.group(1) if m else None
+
+
+def tree_packages(tree: str) -> list[str]:
+    """Packages listed in the header line of a ui_tree() dump. Empty when no
+    node survived trimming (image-only, canvas or WebView screens)."""
+    header = tree.split("\n", 1)[0]
+    _, _, tail = header.partition("packages: ")
+    return [p.strip() for p in tail.split(",") if p.strip() and p.strip() != "-"]
+
+
+def wait_for_settle(
+    focus: Callable[[], str | None],
+    dump: Callable[[], str],
+    *,
+    max_s: float = SETTLE_MAX_S,
+    min_wait_s: float = SETTLE_MIN_WAIT_S,
+    poll_s: float = SETTLE_POLL_S,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    before: str | None = None,
+) -> SettleResult:
+    """Wait until the UI is settled or `max_s` has passed.
+
+    Focus gate (always): two consecutive focus reads give the same non-None
+    window. `focus` returns None while no window has focus (an activity
+    transition). If that window is still `before` (the window focused before
+    the action) and every read gave it, the wait ends there without a dump
+    ("focus_only"). Otherwise (the window changed, or `before` is unknown) two
+    consecutive dumps, each taken right after a focus read that still gives
+    that window, must be identical and list its package ("stable"). The
+    package check is skipped when the window is named without a package or
+    the dump lists none. A dump already in flight may overrun `max_s`.
+    """
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    t0 = clock()
+
+    def elapsed() -> float:
+        return clock() - t0
+
+    sleep(max(0.0, min(min_wait_s, max_s)))
+    last_focus: str | None = None
+    last_tree: str | None = None
+    changed = before is None
+    while True:
+        current = focus()
+        if current != before:
+            changed = True
+        if current is None or current != last_focus:
+            last_focus, last_tree = current, None
+            if elapsed() >= max_s:
+                return SettleResult(round(elapsed(), 3), "cap", None, last_focus)
+            sleep(max(0.0, min(poll_s, max_s - elapsed())))
+            continue
+        if not changed:
+            return SettleResult(round(elapsed(), 3), "focus_only", None, current)
+        if elapsed() >= max_s:
+            return SettleResult(round(elapsed(), 3), "cap", None, last_focus)
+        tree = dump()
+        package = window_package(current)
+        packages = tree_packages(tree)
+        if package is not None and packages and package not in packages:
+            last_tree = None  # the dump still shows the previous window
+        elif tree == last_tree:
+            return SettleResult(round(elapsed(), 3), "stable", tree, current)
+        else:
+            last_tree = tree
 
 
 def scale_factor(width: int, height: int, max_px: int) -> float:
@@ -111,6 +204,7 @@ class AdbDevice:
         self.config = config or Config()
         self.max_tree_lines = max_tree_lines
         self._size: tuple[int, int] | None = None
+        self._focus: str | None = None  # focused window the last settle() ended on
 
     # --- helpers -------------------------------------------------------------
 
@@ -225,6 +319,23 @@ class AdbDevice:
         if dropped:
             lines.append(f"... {dropped} more nodes dropped")
         return "\n".join([header, *lines])
+
+    def focused_window(self) -> str | None:
+        """mCurrentFocus of the first display, or None while it is null or a
+        splash (starting) window, i.e. during an activity transition."""
+        out = adb(self.serial, "shell", "dumpsys window | grep mCurrentFocus= || true", timeout=15)
+        m = FOCUS_RE.search(out)
+        value = m.group(1).strip() if m else "null"
+        return None if value == "null" or "Splash Screen" in value else value
+
+    def settle(self, max_s: float = SETTLE_MAX_S) -> SettleResult:
+        """Wait for the UI to settle after an action (see wait_for_settle),
+        comparing with the window the previous settle ended on (unknown before
+        the first settle or after a cap with no window focused)."""
+        before, self._focus = self._focus, None
+        result = wait_for_settle(self.focused_window, self.ui_tree, max_s=max_s, before=before)
+        self._focus = result.focus
+        return result
 
     def tap(self, x: int, y: int) -> None:
         dx, dy = self._to_device(x, y)

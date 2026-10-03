@@ -27,6 +27,7 @@ Records with `to_dict()` / `from_dict()` survive a JSON round trip; enums serial
   - `open_app(package: str) -> None`
   - `allowed_queries() -> list[str]`
   - `query_structured(name: str, params: dict[str, Any]) -> dict[str, Any]` (read-only, raises `QueryNotAllowed`)
+  - Optional, not part of the Protocol: `settle(max_s: float) -> SettleResult` (`harness.device.adb`). The agent loop calls it, when present, after each successful UI action and before the next observation. `AdbDevice` waits until the focused window is non-null and steady; if that window is the one the previous settle ended on, the wait ends there without a dump (`focus_only`), otherwise two consecutive `ui_tree()` dumps must be identical and list the window's package when they list any (`stable`); or `max_s` elapses (`cap`; default 8 s). Devices without it (the fakes) settle instantly.
 
 ## Confirmation
 
@@ -42,7 +43,7 @@ Records with `to_dict()` / `from_dict()` survive a JSON round trip; enums serial
 ## Trace
 
 - `TokenUsage(input_tokens=0, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0)`, supports `+`, with `to_dict` / `from_dict`
-- `StepRecord(index: int, started_at: str, ended_at: str, tool_name: str, tool_input: dict, tool_result: dict, reasoning: str = "", screenshot_path: str | None = None, ui_tree_path: str | None = None, usage: TokenUsage = TokenUsage(), duration_ms: int = 0)`, with `to_dict` / `from_dict`. Timestamps are ISO-8601 UTC strings; paths are relative to the run folder.
+- `StepRecord(index: int, started_at: str, ended_at: str, tool_name: str, tool_input: dict, tool_result: dict, reasoning: str = "", screenshot_path: str | None = None, ui_tree_path: str | None = None, usage: TokenUsage = TokenUsage(), duration_ms: int = 0, meta: dict = {})`, with `to_dict` / `from_dict`. Timestamps are ISO-8601 UTC strings; paths are relative to the run folder. `meta` holds harness measurements the agent never sees; after a successful UI action it has `settle_s` (seconds spent waiting for the UI to settle before the next observation; 0.0 on devices without `settle`) and, when the device settles, `settle` (`stable`, `focus_only`, `cap` or `error`).
 - `RunRecord(run_id: str, task_id: str | None, flow_type: FlowType, goal: str, model: str, started_at: str, ended_at: str | None = None, agent_verdict: Verdict | None = None, agent_summary: str | None = None, termination_reason: TerminationReason | None = None, usage: TokenUsage = TokenUsage(), estimated_cost_usd: float | None = None, verifier_result: VerifierResult | None = None, seed: int | None = None, meta: dict = {})`, with `to_dict` / `from_dict`. `agent_verdict` is None if the harness ended the run first. `verifier_result` is None for freeform runs. The runner fills in `seed` only after the run ends. `meta` holds runner bookkeeping (confirmation policy, wall time, steps); older run.json files without it load with `{}`.
 
 ## Task
