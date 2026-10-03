@@ -520,6 +520,10 @@
           </div>
           <div id="detail-body"></div>
         </section>
+        <section>
+          <h2>Fake runs (pipeline checks, not agent results)</h2>
+          <div class="scroll"><table id="fake-runs-table"></table></div>
+        </section>
       </div>
 
       <div class="tab" id="tab-flows" hidden>
@@ -1076,7 +1080,16 @@
       // --- runs
       async function loadRuns() {
         const runs = await api("/api/runs");
-        const t = $("runs-table");
+        fillRuns(
+          $("runs-table"),
+          runs.filter((r) => !r.fake),
+        );
+        fillRuns(
+          $("fake-runs-table"),
+          runs.filter((r) => r.fake),
+        );
+      }
+      function fillRuns(t, runs) {
         t.replaceChildren();
         t.append(
           el(
@@ -1160,13 +1173,14 @@
         }
       }
       $("reload-runs").addEventListener("click", loadRuns);
-      $("runs-table").addEventListener("click", (ev) => {
-        const a = ev.target.closest("a.detail-link");
-        if (!a) return;
-        ev.preventDefault();
-        history.replaceState(null, "", "#runs/" + a.dataset.run);
-        showDetail(a.dataset.run);
-      });
+      for (const id of ["runs-table", "fake-runs-table"])
+        $(id).addEventListener("click", (ev) => {
+          const a = ev.target.closest("a.detail-link");
+          if (!a) return;
+          ev.preventDefault();
+          history.replaceState(null, "", "#runs/" + a.dataset.run);
+          showDetail(a.dataset.run);
+        });
       $("detail-close").addEventListener("click", () => {
         $("run-detail").hidden = true;
         history.replaceState(null, "", "#runs");
