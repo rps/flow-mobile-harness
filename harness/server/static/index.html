@@ -1121,10 +1121,12 @@
           const v =
             r.verifier_passed == null
               ? el("span", { class: "muted", text: "unverified" })
-              : el("span", {
-                  class: r.verifier_passed ? "pass" : "fail",
-                  text: r.verifier_passed ? "PASS" : "FAIL",
-                });
+              : r.fake && !r.verifier_passed
+                ? el("span", { class: "muted", text: "expected FAIL" })
+                : el("span", {
+                    class: r.verifier_passed ? "pass" : "fail",
+                    text: r.verifier_passed ? "PASS" : "FAIL",
+                  });
           t.append(
             el(
               "tr",
