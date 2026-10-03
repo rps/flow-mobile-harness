@@ -121,9 +121,42 @@ def _wait_responsive(timeout: float) -> None:
 # --- AVD lifecycle -----------------------------------------------------------
 
 
+def _ini_values(ini: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in ini.read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def check_avd_config() -> None:
+    """Fail closed if the existing AVD was not built from SYSTEM_IMAGE or lacks
+    the configured overrides, so a stale AVD of the same name is never used."""
+    for ini in (TOP_INI, CONFIG_INI):
+        if not ini.is_file():
+            raise DeviceError(f"AVD {AVD_NAME} is listed by the emulator but {ini} does not exist "
+                              "(AVD home elsewhere?); refusing to use it")
+    problems = []
+    cfg = _ini_values(CONFIG_INI)
+    sysdir = cfg.get("image.sysdir.1", "").strip("/")
+    if sysdir != SYSTEM_IMAGE_DIR.as_posix():
+        problems.append(f"image.sysdir.1={sysdir!r} != {SYSTEM_IMAGE_DIR.as_posix()!r}")
+    for key, want in AVD_OVERRIDES.items():
+        if cfg.get(key) != want:
+            problems.append(f"{key}={cfg.get(key)!r} != {want!r}")
+    target, want = _ini_values(TOP_INI).get("target"), f"android-{_image_api_level()}"
+    if target != want:
+        problems.append(f"target={target!r} != {want!r}")
+    if problems:
+        raise DeviceError(f"AVD {AVD_NAME} does not match the configured image/overrides: {'; '.join(problems)}")
+
+
 def create_avd() -> bool:
-    """Create the AVD if missing. Returns True if it was created."""
+    """Create the AVD if missing (and check an existing one matches the
+    configuration). Returns True if it was created."""
     if AVD_NAME in _run([EMULATOR, "-list-avds"]).split():
+        check_avd_config()
         return False
     _run(
         [AVDMANAGER, "create", "avd", "-n", AVD_NAME, "-k", SYSTEM_IMAGE, "-d", DEVICE_PROFILE],
@@ -185,8 +218,41 @@ def start(windowed: bool = False, timeout: float = 300.0) -> float:
             if time.monotonic() >= deadline:
                 raise
     took = time.monotonic() - t0
+    try:
+        check_running_image()
+    except DeviceError:
+        proc.kill()
+        raise
     log.info("booted %s in %.1fs with HVF (log: %s)", SERIAL, took, logfile)
     return took
+
+
+def running_avd_name() -> str:
+    """The AVD the emulator on SERIAL is running (console `avd name`)."""
+    out = _emu("avd", "name", timeout=30, require_ok=False)
+    lines = [l.strip() for l in out.splitlines() if l.strip() and l.strip() != "OK"]
+    if not lines:
+        raise DeviceError(f"emu avd name on {SERIAL} returned no name")
+    return lines[-1]
+
+
+def check_running_image() -> None:
+    """Fail closed if the booted device is not AVD_NAME on SYSTEM_IMAGE:
+    AVD name from the console, API level and ABI from the build props."""
+    problems = []
+    name = running_avd_name()
+    if name != AVD_NAME:
+        problems.append(f"running AVD {name!r} != {AVD_NAME!r}")
+    sdk = _shell("getprop", "ro.build.version.sdk").strip()
+    want_sdk = _image_api_level().split(".")[0]
+    if sdk != want_sdk:
+        problems.append(f"ro.build.version.sdk={sdk!r} != {want_sdk!r}")
+    abi = _shell("getprop", "ro.product.cpu.abi").strip()
+    want_abi = SYSTEM_IMAGE.split(";")[3]
+    if abi != want_abi:
+        problems.append(f"ro.product.cpu.abi={abi!r} != {want_abi!r}")
+    if problems:
+        raise DeviceError(f"{SERIAL} is not running the configured image: {'; '.join(problems)}")
 
 
 def hvf_enabled() -> bool:
@@ -230,11 +296,35 @@ def install_apk(path: str | Path, sha256: str | None = None) -> None:
 # --- Snapshots ---------------------------------------------------------------
 
 
-def _emu(*args: str, timeout: float = 120.0) -> str:
+def _emu(*args: str, timeout: float = 120.0, require_ok: bool = True) -> str:
+    """Run a console command. A line starting with KO is a failure; with
+    require_ok the last non-empty line must be the console's OK (observed on
+    this host for `kill` and `avd snapshot list`; payload-only commands such
+    as `avd name` pass require_ok=False and are judged by their payload)."""
     out = adb(SERIAL, "emu", *args, timeout=timeout)
-    if "KO" in out:
-        raise DeviceError(f"emu {' '.join(args)}: {out.strip()}")
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    if any(l.startswith("KO") for l in lines) or (require_ok and (not lines or lines[-1] != "OK")):
+        raise DeviceError(f"emu {' '.join(args)}: {out.strip() or 'no reply'}")
     return out
+
+
+def snapshot_names() -> list[str]:
+    """TAG column of the loadable rows of `avd snapshot list`: the rows after
+    the `ID TAG ...` header, up to the next blank/section line (the partial,
+    non-loadable section is excluded). Empty if the emulator has none."""
+    names: list[str] = []
+    in_table = False
+    for line in _emu("avd", "snapshot", "list").splitlines():
+        parts = line.split()
+        if parts[:2] == ["ID", "TAG"]:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if len(parts) < 2 or parts[0] == "OK" or parts[0] == "List":
+            break
+        names.append(parts[1])
+    return names
 
 
 def save_snapshot(name: str) -> None:
@@ -246,6 +336,10 @@ def save_snapshot(name: str) -> None:
 def restore_snapshot(name: str = BASELINE, timeout: float = 120.0) -> float:
     """Load a snapshot (never saves). Returns seconds until the device responds."""
     t0 = time.monotonic()
+    if name not in snapshot_names():
+        err = DeviceError(f"snapshot {name!r} does not exist on {SERIAL}; provision first")
+        err.retryable = False  # a cold boot cannot create it; the runner skips its retry
+        raise err
     _emu("avd", "snapshot", "load", name, timeout=timeout)
     _wait_responsive(timeout)
     took = time.monotonic() - t0
@@ -315,6 +409,46 @@ def block_host_loopback() -> tuple[bool, bool]:
 # --- Baseline ----------------------------------------------------------------
 
 
+def check_baseline_matches(path: Path = BASELINE_JSON) -> dict:
+    """Fail closed unless baseline.json describes this configuration and the
+    running device: avd, serial, system_image, snapshot present, Markor
+    installed with the pinned sha256. Returns what was checked."""
+    try:
+        info = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise DeviceError(f"cannot read {path}: {exc}") from exc
+    problems = []
+    for key, want in (("avd", AVD_NAME), ("serial", SERIAL), ("system_image", SYSTEM_IMAGE)):
+        if info.get(key) != want:
+            problems.append(f"baseline.json {key}={info.get(key)!r} != {want!r}")
+    snapshot = info.get("snapshot")
+    name = running_avd_name()
+    if name != AVD_NAME:
+        problems.append(f"running AVD {name!r} != {AVD_NAME!r}")
+    if snapshot not in snapshot_names():
+        problems.append(f"snapshot {snapshot!r} missing on {SERIAL}")
+    if snapshot != BASELINE:
+        problems.append(f"baseline.json snapshot={snapshot!r} != {BASELINE!r}")
+    recorded_sha = (info.get("markor") or {}).get("sha256")
+    if recorded_sha != MARKOR_SHA256:
+        problems.append(f"baseline.json markor.sha256={recorded_sha!r} != pinned {MARKOR_SHA256!r}")
+    try:  # `pm path` exits non-zero for a package that is not installed
+        apk = _shell("pm", "path", MARKOR_PACKAGE).strip().removeprefix("package:").splitlines()
+    except DeviceError:
+        apk = []
+    if not apk or not apk[0]:
+        problems.append(f"{MARKOR_PACKAGE} is not installed")
+        sha = None
+    else:
+        digest = _shell("sha256sum", apk[0]).split()
+        sha = digest[0] if digest else ""
+        if sha != MARKOR_SHA256:
+            problems.append(f"{MARKOR_PACKAGE} sha256 {sha!r} != pinned {MARKOR_SHA256!r}")
+    if problems:
+        raise DeviceError(f"baseline does not match the device: {'; '.join(problems)}")
+    return {"avd": name, "serial": SERIAL, "system_image": SYSTEM_IMAGE, "snapshot": snapshot, "markor_sha256": sha}
+
+
 def record_stock_apps() -> list[str]:
     pkgs = sorted(line.removeprefix("package:").strip() for line in _shell("pm", "list", "packages").splitlines() if line.strip())
     STOCK_APPS.write_text("\n".join(pkgs) + "\n")
@@ -368,7 +502,8 @@ def provision_baseline(windowed: bool = False) -> dict:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="python -m harness.emulator.manager")
-    p.add_argument("command", choices=["create", "start", "stop", "provision", "restore", "rebaseline", "check-loopback"])
+    p.add_argument("command", choices=["create", "start", "stop", "provision", "restore", "rebaseline",
+                                       "check-loopback", "check-baseline"])
     p.add_argument("--windowed", action="store_true")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -386,6 +521,8 @@ def main(argv: list[str] | None = None) -> None:
         save_snapshot(BASELINE)
     elif a.command == "check-loopback":
         print(f"host_loopback_reachable={loopback_reachable()}")
+    elif a.command == "check-baseline":
+        print(json.dumps(check_baseline_matches(), indent=2))
 
 
 if __name__ == "__main__":

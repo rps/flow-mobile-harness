@@ -401,7 +401,7 @@ def run_task(
     active = _Active(run_meta)
     _register(job_keys, active)  # cancellable while queued for the serial lock too
     args = (task, goal, config, policy, run_meta, device_factory, inspector_factory,
-            emulator, store, model_client, seed, settings, blocked, windowed, job_keys, active)
+            emulator, store, model_client, seed, settings, blocked, windowed, job_keys, active, baseline_json)
     try:
         try:
             with serial_lock(store.runs_dir, serial, lock_timeout_s,
@@ -422,6 +422,8 @@ def _restore(emulator: Any, run_meta: dict[str, Any], windowed: bool) -> None:
         emulator.restore_snapshot(BASELINE_SNAPSHOT)
         return
     except Exception as first:
+        if not getattr(first, "retryable", True):
+            raise  # e.g. the snapshot does not exist: a cold boot cannot help
         if not (callable(getattr(emulator, "stop", None)) and callable(getattr(emulator, "start", None))):
             raise
         log.warning("restore failed (%s); stopping and cold-booting the emulator once", first)
@@ -462,6 +464,17 @@ def _set_chrome(inspector: Any, blocked: set[str], run_meta: dict[str, Any]) -> 
         log.warning("could not enable %s: %s", CHROME, e)
 
 
+def _check_baseline(emulator: Any, run_meta: dict[str, Any], baseline_json: str | Path) -> None:
+    """Fail closed if the emulator can compare the run's baseline.json with the
+    running device and finds drift (wrong AVD, image, missing snapshot, Markor
+    sha). Emulators without the check (fakes) are recorded as unchecked."""
+    check = getattr(emulator, "check_baseline_matches", None)
+    if not callable(check):
+        run_meta["baseline_check"] = "unavailable"
+        return
+    run_meta["baseline_check"] = check(Path(baseline_json))  # DeviceError on drift -> ERROR at stage restore
+
+
 def _recheck_loopback(emulator: Any, run_meta: dict[str, Any]) -> None:
     """A freeform run trusts baseline.json's host_loopback_blocked. After a cold
     boot the emulator is a fresh process, so ask it again; fail closed if the
@@ -477,7 +490,8 @@ def _recheck_loopback(emulator: Any, run_meta: dict[str, Any]) -> None:
 
 
 def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_factory,
-              emulator, store, model_client, seed, settings, blocked, windowed, job_keys, active) -> RunRecord:
+              emulator, store, model_client, seed, settings, blocked, windowed, job_keys, active,
+              baseline_json) -> RunRecord:
     t0 = time.monotonic()
     started_at = _now()
     run_id = new_run_id()
@@ -502,6 +516,7 @@ def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_fa
         _restore(emulator, run_meta, windowed)
         if task is None and "restore_retry" in run_meta and not run_meta.get("allow_unblocked"):
             _recheck_loopback(emulator, run_meta)
+        _check_baseline(emulator, run_meta, baseline_json)
         stage = "seed"
         check_cancel()
         inspector = inspector_factory()

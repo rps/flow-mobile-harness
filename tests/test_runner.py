@@ -728,3 +728,45 @@ def test_cancel_accepted_during_the_agents_last_call_still_ends_cancelled(rec):
     assert run.meta["cancelled"] is True and run.termination_reason is TerminationReason.ERROR
     assert run.verifier_result is None and "verify" not in rec.log
     assert "usage_note" not in run.meta  # the completed turn's usage was captured
+
+
+# --- baseline check at run start ----------------------------------------------------
+
+
+def test_emulator_without_baseline_check_is_recorded_unchecked(rec):
+    run = _run(rec)
+    assert run.meta["baseline_check"] == "unavailable" and run.termination_reason is TerminationReason.FINISHED
+
+
+def test_baseline_check_result_is_recorded_and_drift_fails_closed(rec):
+    seen = []
+    rec.check_baseline_matches = lambda path: seen.append(path) or {"avd": "p2", "snapshot": "baseline"}
+    run = _run(rec)
+    assert run.meta["baseline_check"] == {"avd": "p2", "snapshot": "baseline"}
+    assert seen == [runner.BASELINE_JSON]  # the run's baseline_json, not a hard-coded path
+    assert rec.log.index("restore") < rec.log.index("seed_write")
+
+    def drifted(path):
+        raise DeviceError("baseline does not match the device: running AVD 'old' != 'p2'")
+
+    rec.check_baseline_matches = drifted
+    bad = _run(rec)
+    assert bad.termination_reason is TerminationReason.ERROR
+    assert bad.meta["error"].startswith("restore: DeviceError: baseline does not match")
+    assert bad.verifier_result is None and "agent_start" not in rec.log[rec.log.index("finish"):]
+
+
+def test_non_retryable_restore_error_skips_the_cold_boot(tmp_path, monkeypatch):
+    class NoSnapshot(ColdBootRecorder):
+        def restore_snapshot(self, name):
+            self.mark("restore")
+            err = DeviceError("snapshot 'baseline' does not exist; provision first")
+            err.retryable = False
+            raise err
+
+    rec = NoSnapshot(tmp_path / "runs")
+    monkeypatch.setattr(runner, "render_replay", lambda *a, **kw: None)
+    run = _run(rec)
+    assert run.termination_reason is TerminationReason.ERROR
+    assert "stop" not in rec.log and "restore_retry" not in run.meta
+    assert run.meta["error"].startswith("restore: DeviceError: snapshot 'baseline' does not exist")
