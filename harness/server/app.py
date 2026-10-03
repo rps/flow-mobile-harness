@@ -14,6 +14,18 @@ run's meta["confirm_timeouts"].
 Fake runs of flow-F tasks and freeform goals use a scripted model with one
 request_confirmation step inserted by the server (not chosen by an agent),
 so the approve/reject gate can be exercised without an emulator or API.
+
+Cancel: every run is started with meta["job_id"], and a cancel first offers
+the job id to `harness.runner.request_cancel` when that hook exists; if it
+takes the cancel, the runner ends the run (termination ERROR, meta
+"cancelled") and restores baseline itself (meta "restored_after_cancel").
+Otherwise the job's device is wrapped so that the next device call raises
+JobCancelled (a pending `ui` confirmation resolves to reject first), the
+runner records termination ERROR, finishes the trace and renders the replay,
+and the worker restores `baseline` under the serial's queue lock (skipped if
+another process holds it, because that run restores first anyway). A cancel
+that lands after the last run ended changes nothing; the job reports
+`cancel_requested` so the page can say so.
 """
 
 from __future__ import annotations
@@ -47,8 +59,18 @@ from harness.contracts import (
     StepRecord,
     TokenUsage,
 )
-from harness.runner import ConfirmPolicy, RunnerError, confirm_policy, host_loopback_blocked, run_task
-from harness.scoreboard.aggregate import load_runs, scoreboard
+from harness import runner as runner_module
+from harness.runner import (
+    BASELINE_SNAPSHOT,
+    ConfirmPolicy,
+    RunnerBusy,
+    RunnerError,
+    confirm_policy,
+    host_loopback_blocked,
+    run_task,
+    serial_lock,
+)
+from harness.scoreboard.aggregate import FAILURE_TAGS, load_runs_with_tags, load_tags, save_tags, scoreboard
 from harness.tasks import registry
 from harness.trace.store import RunWriter, TraceStore
 
@@ -57,8 +79,11 @@ log = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "harness_ui_token"
 RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+STEP_FILE_RE = re.compile(r"^step_\d{3,}\.(txt|png)$")
 FAKE_CONFIRM_NOTE = "scripted fake step inserted by the server, not chosen by an agent"
-TERMINAL = ("done", "error")
+TERMINAL = ("done", "error", "cancelled")
+RESTORE_LOCK_TIMEOUT_S = 30.0
+CANCELLED_BY = "web_ui"  # meta["cancelled_by"] when the server's own fallback stopped a run
 
 
 # --- Jobs ------------------------------------------------------------------------
@@ -84,6 +109,14 @@ class Answer(BaseModel):
     decision: ConfirmationDecision
 
 
+class Tags(BaseModel):
+    tags: list[Literal[FAILURE_TAGS]]  # type: ignore[valid-type]
+
+
+class JobCancelled(Exception):
+    """Raised inside a run by the server's wrappers once its job is cancelled."""
+
+
 @dataclasses.dataclass
 class Job:
     id: str
@@ -97,6 +130,18 @@ class Job:
     answer: ConfirmationDecision | None = None
     answered: threading.Event = dataclasses.field(default_factory=threading.Event)
     run: RunRecord | None = None
+    cancelled: threading.Event = dataclasses.field(default_factory=threading.Event)
+    runner_cancel: bool = False  # the runner's own hook accepted the cancel for the active run
+    restore: str | None = None
+
+    def check_cancelled(self) -> None:
+        """Fallback stop: raise once cancelled, unless the runner's hook took
+        the cancel (it then ends the run itself and restores baseline). The
+        run's meta records who cancelled, so nothing has to parse the error."""
+        if self.cancelled.is_set() and not self.runner_cancel:
+            if self.run is not None:
+                self.run.meta["cancelled_by"] = CANCELLED_BY
+            raise JobCancelled("cancelled from the web UI")
 
     def emit(self, kind: str, data: dict[str, Any]) -> None:
         with self.cond:
@@ -107,7 +152,8 @@ class Job:
         out = {
             "job_id": self.id, "status": self.status, "run_ids": list(self.run_ids), "error": self.error,
             "task_id": self.req.task_id, "goal": self.req.goal, "policy": self.req.policy,
-            "fake": self.req.fake, "repeat": self.req.repeat,
+            "fake": self.req.fake, "repeat": self.req.repeat, "restore": self.restore,
+            "cancel_requested": self.cancelled.is_set(),
         }
         if self.pending is not None:
             out["pending"] = self.pending.to_dict()
@@ -116,6 +162,53 @@ class Job:
 
 def _cost(model: str, usage: TokenUsage) -> float | None:
     return estimate_cost(model, usage) if model_price(model) is not None else None
+
+
+def _request_runner_cancel(job: Job) -> bool:
+    """`harness.runner.request_cancel(key: str) -> bool` (area B): every run
+    is started with meta["job_id"], so the job id is the key. True means the
+    runner owns this cancel: it ends the active run (termination ERROR,
+    meta["cancelled"]) and restores baseline itself (meta["restored_after_cancel"]).
+    A missing hook (main today), False, or an error leaves the server-side
+    fallback in charge: the wrapped device raises at its next call and the
+    worker restores baseline under the serial lock. Waived limitation of the
+    fallback (not of the hook): the exception travels up through the agent
+    loop, so the in-flight step's usage and cost are not accounted; the hook
+    stops at the runner's gate and keeps them."""
+    hook = getattr(runner_module, "request_cancel", None)
+    if hook is None:
+        return False
+    try:
+        return bool(hook(job.id))
+    except Exception:
+        log.exception("runner.request_cancel failed for job %s", job.id)
+        return False
+
+
+class _CancellableDevice:
+    """Device wrapper: every call except close() and allowed_queries() checks
+    for cancel first (the agent loop swallows an allowed_queries() error, so
+    raising there would hide the cancel). The loop observes the screen after
+    every step, so a cancel surfaces within one step."""
+
+    def __init__(self, inner: Any, job: Job) -> None:
+        self._inner, self._job = inner, job
+
+    def close(self) -> None:
+        inner_close = getattr(self._inner, "close", None)
+        if callable(inner_close):
+            inner_close()
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr) or name == "allowed_queries":
+            return attr
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            self._job.check_cancelled()
+            return attr(*args, **kwargs)
+
+        return call
 
 
 class _ObservedWriter(RunWriter):
@@ -133,6 +226,7 @@ class _ObservedWriter(RunWriter):
             "tool_input": stored.tool_input,
             "tool_result": stored.tool_result,
             "reasoning": stored.reasoning,
+            "ui_tree_path": stored.ui_tree_path,
             "screenshot_png_b64": base64.b64encode(screenshot_png).decode() if screenshot_png else None,
             "usage_so_far": self.usage.to_dict(),
             "cost_so_far_usd": _cost(self.run.model, self.usage),
@@ -214,13 +308,17 @@ class JobManager:
                 job.answer = None
                 job.pending = request
                 job.status = "waiting_confirmation"
+                if job.cancelled.is_set():  # cancelled between the last check and now
+                    job.answer = ConfirmationDecision.REJECT
+                    job.answered.set()
             job.emit("confirmation", {"run_id": job.run.run_id if job.run else None, **request.to_dict()})
             got = job.answered.wait(self.confirm_timeout_s)
             with job.cond:
                 decision = job.answer if got and job.answer is not None else ConfirmationDecision.REJECT
+                cancelled = job.cancelled.is_set() and decision is ConfirmationDecision.REJECT
                 job.pending = None
                 job.status = "running"
-            source = "ui" if got else "timeout"
+            source = "cancel" if cancelled else "ui" if got else "timeout"
             if job.run is not None:
                 job.run.meta.setdefault("ui_confirmations", []).append(
                     {"action": request.action, "decision": decision.value, "by": source})
@@ -231,6 +329,31 @@ class JobManager:
             return decision
 
         return ConfirmPolicy("ui", "ui", handler)
+
+    def cancel(self, job: Job) -> bool:
+        """Cancel a queued or running job; False if it has already ended. A
+        queued job ends at once; a running one at its next device call (or at
+        the runner's own cancel gate when its hook takes the cancel)."""
+        with job.cond:
+            if job.status in TERMINAL:
+                return False
+            if job.pending is not None:  # a waiting confirmation resolves to reject, even if answered
+                job.answer = ConfirmationDecision.REJECT
+                job.answered.set()
+            if job.cancelled.is_set():  # already stopping
+                return True
+            job.cancelled.set()  # before the hook: no further repeat can start from here on
+            running = job.status != "queued"
+            if not running:
+                job.status = "cancelled"
+        if not running:
+            job.emit("job_done", job.summary())
+            return True
+        # The runner's hook is called without job.cond held: it may block, and
+        # the worker needs the lock to emit events. Until it answers, the
+        # device wrapper may already have stopped the run; that is fine.
+        job.runner_cancel = _request_runner_cancel(job)
+        return True
 
     def answer(self, job: Job, decision: ConfirmationDecision) -> bool:
         with job.cond:
@@ -256,41 +379,90 @@ class JobManager:
             job = self.queue.get()
             if job is None or self.closing.is_set():
                 return
+            with job.cond:
+                if job.cancelled.is_set():  # cancelled while queued; cancel() reported it
+                    continue
+                job.status = "running"
             try:
-                self._run_job(job)
+                interrupted = self._run_job(job)
             except Exception as e:  # a job error must not kill the worker
                 log.exception("job %s failed", job.id)
                 job.status, job.error = "error", f"{type(e).__name__}: {e}"
             else:
-                job.status = "done"
+                job.status = "cancelled" if interrupted else "done"
             job.emit("job_done", job.summary())
 
-    def _run_job(self, job: Job) -> None:
+    def _run_job(self, job: Job) -> bool:
+        """Run the job's repeats; True if a cancel cut a run short or skipped
+        one (a cancel that lands after the last run ended changes nothing)."""
         from harness.fake_env import ScriptedClient
 
         req = job.req
-        job.status = "running"
         env = self._env(req.fake)
         policy = self._ui_policy(job) if req.policy == "ui" else confirm_policy(req.policy)
         store = _ObservedStore(env.config.runs_dir, job)
         script = _fake_script(req.task_id, req.goal) if req.fake else None
+        device_factory = lambda: _CancellableDevice(env.device_factory(), job)  # noqa: E731
         for _ in range(req.repeat):
             if self.closing.is_set():
                 break
+            if job.cancelled.is_set():
+                return True
             client = ScriptedClient(script) if script is not None else env.model_client_factory()
             run = run_task(
                 req.task_id, req.goal, env.config, policy,
-                device_factory=env.device_factory, inspector_factory=env.inspector_factory,
+                device_factory=device_factory, inspector_factory=env.inspector_factory,
                 emulator=env.emulator, store=store, model_client=client, settings=env.settings,
                 allow_unblocked=self.allow_unblocked, baseline_json=self.baseline_json,
-                meta={"fake": env.fake, "source": "web_ui",
+                meta={"fake": env.fake, "source": "web_ui", "job_id": job.id,
                       **({"fake_confirm_step": FAKE_CONFIRM_NOTE} if script is not None else {})},
             )
             job.emit("run_finished", _run_summary(run, Path(env.config.runs_dir)))
             job.run = None
+            if run.meta.get("cancelled"):  # the runner ended and restored it
+                job.restore = _runner_restore_state(run.meta.get("restored_after_cancel"))
+                job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "runner"})
+                return True
+            if run.meta.get("cancelled_by") == CANCELLED_BY:  # the server's fallback stopped it
+                job.restore = self._restore(env)
+                job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "server"})
+                return True
+            if job.cancelled.is_set():  # cancel accepted, but nothing stopped the run: restore anyway
+                note = ("runner hook accepted the cancel but the run ended without it" if job.runner_cancel
+                        else "the run ended before the cancel could stop it")
+                job.restore = self._restore(env)
+                job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "server", "note": note})
+                return True
+        return False
+
+    @staticmethod
+    def _restore(env: Any) -> str:
+        """Restore `baseline` after a cancelled run, under the serial's queue lock."""
+        serial = getattr(env.emulator, "SERIAL", "default")
+        try:
+            with serial_lock(env.config.runs_dir, serial, RESTORE_LOCK_TIMEOUT_S):
+                env.emulator.restore_snapshot(BASELINE_SNAPSHOT)
+        except RunnerBusy:
+            log.warning("restore after cancel skipped: another run holds the queue for %s", serial)
+            return "skipped_busy"
+        except Exception as e:
+            log.exception("restore after cancel failed")
+            return f"failed: {type(e).__name__}: {e}"
+        return "done"
 
 
-def _run_summary(run: RunRecord, runs_dir: Path) -> dict[str, Any]:
+def _runner_restore_state(restored: Any) -> str:
+    """meta["restored_after_cancel"] as the job's restore field: True (or a
+    restore duration) is done, a string is the runner's error, nothing is
+    not_recorded."""
+    if restored is True or (isinstance(restored, (int, float)) and not isinstance(restored, bool)):
+        return "done"
+    if isinstance(restored, str) and restored:
+        return f"failed: {restored}"
+    return "not_recorded"
+
+
+def _run_summary(run: RunRecord, runs_dir: Path, tags: list[str] | None = None) -> dict[str, Any]:
     vr = run.verifier_result
     return {
         "run_id": run.run_id,
@@ -312,6 +484,9 @@ def _run_summary(run: RunRecord, runs_dir: Path) -> dict[str, Any]:
         "confirm_timeouts": run.meta.get("confirm_timeouts", []),
         "error": run.meta.get("error"),
         "has_replay": (runs_dir / run.run_id / "replay.html").is_file(),
+        "cancelled": bool(run.meta.get("cancelled")) or run.meta.get("cancelled_by") == CANCELLED_BY,
+        "restored_after_cancel": run.meta.get("restored_after_cancel"),
+        "tags": load_tags(runs_dir / run.run_id)["tags"] if tags is None else tags,
     }
 
 
@@ -379,7 +554,7 @@ def create_app(
             "Re-provision the baseline or start the server with --allow-unblocked.")
         return {"freeform_enabled": enabled, "freeform_note": note, "fake_default": fake_default,
                 "confirm_timeout_s": confirm_timeout_s, "model": config.model,
-                "fake_confirm_note": FAKE_CONFIRM_NOTE}
+                "fake_confirm_note": FAKE_CONFIRM_NOTE, "failure_tags": list(FAILURE_TAGS)}
 
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
@@ -431,6 +606,13 @@ def create_app(
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel(job_id: str) -> dict[str, Any]:
+        job = _job(job_id)
+        if not jobs.cancel(job):
+            raise HTTPException(409, f"job already {job.status}")
+        return job.summary()
+
     @app.get("/api/jobs/{job_id}/confirmation")
     def pending(job_id: str) -> Response:
         job = _job(job_id)
@@ -448,7 +630,7 @@ def create_app(
 
     @app.get("/api/runs")
     def runs() -> list[dict[str, Any]]:
-        out = [_run_summary(r, runs_dir) for r in load_runs(runs_dir)]
+        out = [_run_summary(r, runs_dir, tags) for r, tags in load_runs_with_tags(runs_dir)]
         return sorted(out, key=lambda r: r["started_at"], reverse=True)
 
     @app.get("/runs/{run_id}/replay.html")
@@ -457,6 +639,47 @@ def create_app(
         if not RUN_ID_RE.match(run_id) or not path.is_file():
             raise HTTPException(404, "no replay for that run")
         return FileResponse(path, media_type="text/html", headers={"Referrer-Policy": "no-referrer"})
+
+    @app.get("/runs/{run_id}/{name}")
+    def step_file(run_id: str, name: str) -> FileResponse:
+        """A step's UI-tree text (step_NNN.txt) or screenshot (step_NNN.png)."""
+        path = runs_dir / run_id / name
+        if not RUN_ID_RE.match(run_id) or not STEP_FILE_RE.match(name) or not path.is_file():
+            raise HTTPException(404, "no such step file")
+        media = "image/png" if name.endswith(".png") else "text/plain; charset=utf-8"
+        return FileResponse(path, media_type=media,
+                            headers={"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+
+    def _run_dir(run_id: str) -> Path:
+        if not RUN_ID_RE.match(run_id) or not (runs_dir / run_id / "run.json").is_file():
+            raise HTTPException(404, "unknown run")
+        return runs_dir / run_id
+
+    @app.get("/api/runs/{run_id}")
+    def run_detail(run_id: str) -> dict[str, Any]:
+        """The full run record (including meta), its steps and tags; step
+        paths are relative to the run folder and served under /runs/<id>/."""
+        if not RUN_ID_RE.match(run_id):
+            raise HTTPException(404, "unknown run")
+        try:
+            run, steps = TraceStore(runs_dir).load_run(run_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "unknown run") from None
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise HTTPException(500, f"run.json unreadable: {type(e).__name__}") from e
+        return {
+            **_run_summary(run, runs_dir),
+            "run": run.to_dict(),
+            "trace": [s.to_dict() for s in steps],  # "steps" above stays the count
+        }
+
+    @app.get("/api/runs/{run_id}/tags")
+    def get_tags(run_id: str) -> dict[str, Any]:
+        return {"run_id": run_id, **load_tags(_run_dir(run_id))}
+
+    @app.put("/api/runs/{run_id}/tags")
+    def put_tags(run_id: str, body: Tags) -> dict[str, Any]:
+        return {"run_id": run_id, **save_tags(_run_dir(run_id), list(body.tags))}
 
     @app.get("/api/scoreboard")
     def board() -> dict[str, Any]:

@@ -1,4 +1,7 @@
 import json
+from datetime import datetime
+
+import pytest
 
 from harness.contracts import (
     FlowType,
@@ -74,3 +77,77 @@ def test_empty_or_missing_dir_and_unreadable_files(tmp_path):
     (runs / "ledger.json").write_text("garbage")
     assert len(load_runs(runs)) == 1
     assert scoreboard(runs)["ledger_total_usd"] == 0.0
+
+
+def test_failure_tags_counted_per_flow_task_and_totals(tmp_path):
+    from harness.scoreboard.aggregate import FAILURE_TAGS, load_tags, save_tags
+
+    runs = tmp_path / "runs"
+    _write(runs, 1)
+    _write(runs, 2)
+    _write(runs, 3, task="f_send_sms", flow=FlowType.F)
+    save_tags(runs / "20260101-000001-aaaaaa", ["lost_state", "wrong_element"])
+    save_tags(runs / "20260101-000002-aaaaaa", ["lost_state"])
+    (runs / "20260101-000003-aaaaaa" / "tags.json").write_text("{broken")  # unreadable: no tags
+    board = scoreboard(runs)["real"]
+    a = next(r for r in board["by_flow"] if r["flow_type"] == "a")
+    assert a["failure_tags"]["lost_state"] == 2 and a["failure_tags"]["wrong_element"] == 1
+    assert set(a["failure_tags"]) == set(FAILURE_TAGS)
+    f = next(r for r in board["by_task"] if r["task_id"] == "f_send_sms")
+    assert sum(f["failure_tags"].values()) == 0
+    assert board["totals"]["failure_tags"]["lost_state"] == 2
+    assert load_tags(runs / "20260101-000001-aaaaaa")["tags"] == ["wrong_element", "lost_state"]  # canonical order
+
+
+def test_save_tags_rejects_unknown_and_drops_duplicates(tmp_path):
+    from harness.scoreboard.aggregate import load_tags, save_tags
+
+    with pytest.raises(ValueError, match="unknown tags"):
+        save_tags(tmp_path, ["lost_state", "bogus"])
+    assert not (tmp_path / "tags.json").exists()
+    out = save_tags(tmp_path, ["login_wall", "login_wall"])
+    assert out["tags"] == ["login_wall"] and out["updated_at"]
+    assert load_tags(tmp_path)["tags"] == ["login_wall"]
+    datetime.fromisoformat(out["updated_at"])  # a real timestamp
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tags.json"]  # no .tmp left behind
+    (tmp_path / "tags.json").write_text(json.dumps({"tags": ["login_wall", "made_up"]}))
+    assert load_tags(tmp_path)["tags"] == ["login_wall"]
+
+
+@pytest.mark.parametrize("raw", ['["login_wall"]', '{"tags": 5}', '{"tags": "login_wall"}', "null"])
+def test_load_tags_wrong_shape_reads_as_no_tags(tmp_path, raw):
+    from harness.scoreboard.aggregate import load_tags
+
+    (tmp_path / "tags.json").write_text(raw)
+    assert load_tags(tmp_path) == {"tags": [], "updated_at": None}
+
+
+def test_fake_run_tags_do_not_count_in_real_group(tmp_path):
+    from harness.scoreboard.aggregate import save_tags
+
+    runs = tmp_path / "runs"
+    _write(runs, 1, fake=True)
+    _write(runs, 2)
+    save_tags(runs / "20260101-000001-aaaaaa", ["false_success"])
+    board = scoreboard(runs)
+    assert board["fake"]["totals"]["failure_tags"]["false_success"] == 1
+    assert board["real"]["totals"]["failure_tags"]["false_success"] == 0
+
+
+def test_oracle_tier_falls_back_to_registry_when_unverified(tmp_path):
+    runs = tmp_path / "runs"
+    _write(runs, 1, task="f_send_sms", flow=FlowType.F, passed=None)  # errored before verify
+    _write(runs, 2, task="gone_task", passed=None)
+    _write(runs, 3, task=None, flow=FlowType.FREEFORM, passed=None)
+    tasks = {r["task_id"]: r for r in scoreboard(runs)["real"]["by_task"]}
+    assert tasks["f_send_sms"]["oracle_tier"] == int(OracleTier.DOWNSTREAM_EFFECT) == 3  # f_send_sms is tier 3
+    assert tasks["gone_task"]["oracle_tier"] is None
+    assert tasks["freeform"]["oracle_tier"] is None
+
+
+def test_oracle_tier_from_a_verified_run_beats_the_registry(tmp_path):
+    runs = tmp_path / "runs"
+    _write(runs, 1, task="f_send_sms", flow=FlowType.F, passed=None)
+    _write(runs, 2, task="f_send_sms", flow=FlowType.F, passed=True)  # _write records OWN_STORAGE (1)
+    tasks = {r["task_id"]: r for r in scoreboard(runs)["real"]["by_task"]}
+    assert tasks["f_send_sms"]["oracle_tier"] == int(OracleTier.OWN_STORAGE) == 1
