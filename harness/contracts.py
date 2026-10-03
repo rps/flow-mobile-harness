@@ -329,6 +329,17 @@ class RunRecord:
 # --- Task definition ---------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RunLimits:
+    """Per-task caps on the agent's run. They replace Config.max_steps,
+    Config.wall_clock_s and Config.run_cap_usd for that task, so a slow task
+    gets headroom and a short one cannot spend long in an action loop."""
+
+    max_steps: int
+    wall_clock_s: float
+    run_cap_usd: float
+
+
 @dataclass
 class TaskSpec:
     """A predefined task. Agent-side code gets `goal` only.
@@ -345,6 +356,7 @@ class TaskSpec:
     seed_spec: Any = None
     checks: list[Any] = field(default_factory=list)
     sensitive_actions: list[str] = field(default_factory=list)
+    limits: RunLimits | None = None  # None: the Config limits apply
 
 
 # --- Config ------------------------------------------------------------------

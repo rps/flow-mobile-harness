@@ -56,7 +56,7 @@ def fake_env(config: Config) -> Env:
         device_factory=make_fake_device,
         inspector_factory=lambda: inspector,
         model_client_factory=ScriptedClient,
-        settings=AgentSettings(allow_unpriced=True),
+        settings=AgentSettings(allow_unpriced=True, run_reserve_usd=0.0),  # the scripted model costs nothing
         fake=True,
     )
 

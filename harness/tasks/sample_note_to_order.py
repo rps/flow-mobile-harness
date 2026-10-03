@@ -22,12 +22,12 @@ orders, catalogue and settings unchanged; no file or sms changes.
 
 Oracle: the app's SQLite database (tier 1) and plan.expected.
 
-Run limits (decided 2026-10-03): run these tasks with HARNESS_MAX_STEPS=60
-and HARNESS_RUN_CAP_USD=2.50 (defaults 40 and $1.50). TaskSpec has no
-per-task step cap, so both are environment settings. With the 600-character
-EditText label and the permission-exemption prompt, the 2026-10-03 re-runs
-took 35 steps ($1.13, b2) and 51 steps ($1.91, h2). At 40 steps both first
-runs stopped before finishing. The verifier is unaffected by either cap.
+Run limits: harness/tasks/limits.py gives these two tasks their own caps
+(60 steps and $2.50 for b2, 70 steps and $3.00 for h2), so no environment
+setting is needed. With the 600-character EditText label and the
+permission-exemption prompt, the 2026-10-03 re-runs took 35 steps ($1.13,
+b2) and 51 steps ($1.91, h2). At the global 40 steps both first runs stopped
+before finishing. The verifier is unaffected by the caps.
 """
 
 from __future__ import annotations

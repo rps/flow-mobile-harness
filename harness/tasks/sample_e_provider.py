@@ -20,6 +20,9 @@ from harness.verify.checks import END_STATE, SIDE_EFFECTS, Check, VerifyContext,
 from harness.verify.diff import AllowedChanges
 from harness.verify.sample_app import cart_unchanged, money_in_text, no_new_orders, seeded_orders_unchanged
 
+STALE_ANSWER = "note gives the previous order's total, not the newest (the stale provider's answer)"
+TOTAL_CHECK = "note_has_newest_order_total"
+
 GOAL = 'Find the total of my most recent order in the Jetsnack app and save it in a Markor note titled "{title}".'
 
 
@@ -45,6 +48,8 @@ def _note_has_total(ctx: VerifyContext) -> tuple[bool, str]:
     if path is None:
         return False, detail
     if not money_in_text(text, ctx.expected["total"]):
+        if money_in_text(text, ctx.expected["decoy_total"]):
+            return False, STALE_ANSWER
         return False, "newest order's total missing"
     if money_in_text(text, ctx.expected["decoy_total"]):
         return False, "note also gives the previous order's total"
@@ -60,7 +65,7 @@ def total_task(task_id: str, provider_mode: str) -> TaskSpec:
         seed_spec=make_seed_spec(provider_mode),
         checks=[
             Check("note_created_with_title", END_STATE, _note_exists),
-            Check("note_has_newest_order_total", END_STATE, _note_has_total),
+            Check(TOTAL_CHECK, END_STATE, _note_has_total),
             Check("seeded_orders_unchanged", SIDE_EFFECTS, seeded_orders_unchanged),
             Check("no_new_orders", SIDE_EFFECTS, no_new_orders),
             Check("cart_unchanged", SIDE_EFFECTS, cart_unchanged),
@@ -71,3 +76,13 @@ def total_task(task_id: str, provider_mode: str) -> TaskSpec:
 
 TASK_FULL = total_task("e_provider_full", "full")
 TASK_FALLBACK = total_task("e_provider_fallback", "stale")
+
+
+def designed_failure(task_id: str | None, result) -> bool:
+    """The failure e_provider_fallback is built to show: the agent saved the
+    stale provider's answer and nothing else is wrong. Any other failure of
+    that task (no note, a wrong figure, a side effect) is not."""
+    if task_id != TASK_FALLBACK.id or result is None or result.passed:
+        return False
+    failed = [c for c in (*result.end_state, *result.side_effects, *result.process) if not c.passed]
+    return [(c.name, c.detail) for c in failed] == [(TOTAL_CHECK, STALE_ANSWER)]

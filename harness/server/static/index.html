@@ -994,19 +994,25 @@
         });
         source.addEventListener("run_finished", (e) => {
           const d = JSON.parse(e.data);
+          const expectedFail =
+            d.verifier_passed === false && (d.fake || d.expected_fail);
           const v =
             d.verifier_passed == null
               ? "unverified"
               : d.verifier_passed
                 ? "verifier PASS"
-                : "verifier FAIL";
+                : expectedFail
+                  ? "verifier expected FAIL"
+                  : "verifier FAIL";
           $("steps").append(
             el("li", {
               class: d.verifier_passed
                 ? "pass"
-                : d.verifier_passed === false
-                  ? "fail"
-                  : "warn",
+                : expectedFail
+                  ? "muted"
+                  : d.verifier_passed === false
+                    ? "fail"
+                    : "warn",
               text:
                 "Finished: agent " +
                 (d.agent_verdict || "none") +
@@ -1121,7 +1127,7 @@
           const v =
             r.verifier_passed == null
               ? el("span", { class: "muted", text: "unverified" })
-              : r.fake && !r.verifier_passed
+              : (r.fake || r.expected_fail) && !r.verifier_passed
                 ? el("span", { class: "muted", text: "expected FAIL" })
                 : el("span", {
                     class: r.verifier_passed ? "pass" : "fail",

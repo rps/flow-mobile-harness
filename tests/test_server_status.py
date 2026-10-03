@@ -176,7 +176,8 @@ def test_worker_clears_the_finished_run_so_the_gap_between_repeats_is_not_double
 
     monkeypatch.setattr(app_module, "run_task", spy)
     # a real (priced) job whose runs use the fake device and scripted model
-    monkeypatch.setattr(manager, "_env", lambda fake: cli.fake_env(manager.config))
+    monkeypatch.setattr(manager, "_env", lambda req, meta: (cli.fake_env(manager.config),
+                                                            {"baseline_json": manager.baseline_json, "meta": meta}))
     job = manager.submit(StartJob(task_id="a_markor_note", repeat=3, policy="approve"))
     manager.start()
     try:

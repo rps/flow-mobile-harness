@@ -117,15 +117,54 @@ def test_restore_snapshot_rejects_other_names(monkeypatch):
         business.restore_snapshot("probe")
 
 
-def test_manager_binding_refuses_a_manager_bound_elsewhere(monkeypatch):
+def test_manager_bound_elsewhere_gets_a_private_copy_and_keeps_its_own_avd(monkeypatch):
+    """One process (the web server) drives both AVDs: the profile loads its own
+    manager copy and leaves the default manager and os.environ as they were."""
+    import os
     import sys
     import types
 
     other = types.ModuleType("harness.emulator.manager")
     other.AVD_NAME, other.PORT = "p2_harness_api36", 5584
     monkeypatch.setitem(sys.modules, "harness.emulator.manager", other)
-    with pytest.raises(ProfileError, match="already bound"):
-        business.manager()
+    monkeypatch.setattr(business, "_private_manager", None)
+    monkeypatch.setenv("LABS_AVD_NAME", "p2_harness_api36")
+    monkeypatch.setenv("LABS_AVD_PORT", "5584")
+    monkeypatch.delenv("LABS_SYSTEM_IMAGE", raising=False)
+    m = business.manager()
+    assert m is not other and sys.modules["harness.emulator.manager"] is other
+    assert (m.AVD_NAME, m.PORT, m.SERIAL, m.SYSTEM_IMAGE) == (
+        business.AVD_NAME, business.PORT, business.SERIAL, business.SYSTEM_IMAGE)
+    assert (other.AVD_NAME, other.PORT) == ("p2_harness_api36", 5584)
+    assert os.environ["LABS_AVD_NAME"] == "p2_harness_api36" and os.environ["LABS_AVD_PORT"] == "5584"
+    assert "LABS_SYSTEM_IMAGE" not in os.environ
+    assert business.manager() is m  # loaded once
+
+
+def test_manager_not_yet_imported_is_bound_to_this_profile(monkeypatch):
+    import sys
+
+    for name in ("LABS_AVD_NAME", "LABS_AVD_PORT", "LABS_SYSTEM_IMAGE"):
+        monkeypatch.setenv(name, "placeholder")  # restored after the test; manager() overwrites them
+    monkeypatch.delitem(sys.modules, "harness.emulator.manager", raising=False)
+    import harness.emulator
+    monkeypatch.delattr(harness.emulator, "manager", raising=False)
+    m = business.manager()
+    assert sys.modules["harness.emulator.manager"] is m and m.AVD_NAME == business.AVD_NAME
+    monkeypatch.delitem(sys.modules, "harness.emulator.manager")  # the next import rebinds to the default AVD
+
+
+def test_prepare_scored_returns_the_env_and_the_run_task_arguments(monkeypatch):
+    built = []
+    _fake_env(monkeypatch, built)
+    monkeypatch.setattr(biz_api, "from_env", lambda environ=None: None)
+    meta = {"source": "web_ui"}
+    env, kwargs = business.prepare_scored("biz_b2_rate", object(), windowed=False, meta=meta, goal="sneaky")
+    assert built == [("env", None)] and env.emulator is env.device_factory
+    assert "goal" not in kwargs and kwargs["baseline_json"] == business.BASELINE_JSON and kwargs["windowed"] is False
+    assert kwargs["block_packages"] == ("com.android.vending",)
+    assert kwargs["meta"] is meta and meta["profile"] == "business" and meta["source"] == "web_ui"
+    assert kwargs["inspector_factory"]() == "inspector"
 
 
 def test_env_prefix_names_every_override():

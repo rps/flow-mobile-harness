@@ -2,10 +2,12 @@
 Invoice Ninja logged in (AVD p2_business_play, port 5592, snapshot `business`).
 
 The manager reads LABS_AVD_NAME / LABS_AVD_PORT / LABS_SYSTEM_IMAGE when it
-is imported, so this module sets them and imports the manager lazily;
-importing the manager for the default AVD first and then this profile raises
-ProfileError. To use the stock CLI against this profile, prefix the command
-with exactly these values (ENV_PREFIX below):
+is imported, so this module sets them and imports the manager lazily. In a
+process whose manager is already bound to the default AVD (the web server,
+which runs both profiles), this profile loads its own private copy of the
+manager module instead and leaves the default one and os.environ untouched.
+To use the stock CLI against this profile, prefix the command with exactly
+these values (ENV_PREFIX below):
 
     LABS_AVD_NAME=p2_business_play LABS_AVD_PORT=5592 \
     LABS_SYSTEM_IMAGE=system-images;android-36.1;google_apis_playstore;arm64-v8a \
@@ -36,6 +38,7 @@ CLI: python -m harness.emulator.profiles.business
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -71,6 +74,7 @@ APPS = {
     "invoice_ninja": "com.invoiceninja.app",
     "markor": "net.gsantner.markor",
 }
+TASK_IDS = ("biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h")  # the tasks that run on this profile
 INVOICE_TASKS = ("biz_d_invoice", "biz_h")  # tasks whose oracle tier follows the invoice oracle
 CLEANUP_TASKS = ("biz_d_invoice",)  # tasks that need no earlier invoice for the client
 
@@ -79,14 +83,42 @@ class ProfileError(DeviceError):
     """The manager is bound to a different AVD or does not support overrides."""
 
 
+_private_manager: ModuleType | None = None  # this profile's own copy, when the default manager is bound elsewhere
+
+
+def _load_private_manager() -> ModuleType:
+    """A second copy of the manager module, executed with this profile's
+    LABS_AVD_* values and not registered as harness.emulator.manager. The
+    manager reads those variables only while it is imported, so os.environ is
+    put back afterwards and the default manager keeps its own AVD."""
+    spec = importlib.util.spec_from_file_location("harness.emulator._manager_business", HERE.parent / "manager.py")
+    m = importlib.util.module_from_spec(spec)
+    saved = {k: os.environ.get(k) for k in ENV}
+    os.environ.update(ENV)
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return m
+
+
 def manager() -> ModuleType:
-    """harness.emulator.manager bound to this AVD (imported on first use)."""
+    """The emulator manager bound to this AVD: harness.emulator.manager itself
+    when nothing else has bound it (imported on first use), else a private
+    copy, so one process can drive the default AVD and this one."""
+    global _private_manager
     existing = sys.modules.get("harness.emulator.manager")
     if existing is not None and getattr(existing, "AVD_NAME", None) != AVD_NAME:
-        raise ProfileError(f"harness.emulator.manager is already bound to {existing.AVD_NAME!r}; "
-                           f"import {__name__} before the manager or run in a separate process")
-    os.environ.update(ENV)
-    from harness.emulator import manager as m
+        if _private_manager is None or _private_manager.AVD_NAME != AVD_NAME:
+            _private_manager = _load_private_manager()
+        m = _private_manager
+    else:
+        os.environ.update(ENV)
+        from harness.emulator import manager as m
 
     if m.AVD_NAME != AVD_NAME or m.PORT != PORT or getattr(m, "SYSTEM_IMAGE", SYSTEM_IMAGE) != SYSTEM_IMAGE:
         raise ProfileError("harness.emulator.manager ignores LABS_AVD_NAME/LABS_AVD_PORT/LABS_SYSTEM_IMAGE")
@@ -281,6 +313,19 @@ def run_scored(task_id: str, config, confirm_policy, store, *, windowed: bool = 
     placed there is the one run.json records); a failed cleanup ends the run
     with termination ERROR at stage "seed"."""
     from harness.runner import run_task
+
+    e, kwargs = prepare_scored(task_id, config, windowed=windowed, **kwargs)
+    return run_task(task_id, None, config, confirm_policy, device_factory=e.device_factory, emulator=e.emulator,
+                    store=store, **kwargs)
+
+
+def prepare_scored(task_id: str, config, *, windowed: bool = True, **kwargs):
+    """Everything run_scored decides, for a caller that calls runner.run_task
+    itself (the web server, which wraps the device and the store): returns
+    this profile's Env (booting the AVD if needed) and the run_task keyword
+    arguments, including the inspector factory, to pass alongside the caller's
+    own. `kwargs` are the caller's run_task arguments; meta, block_packages,
+    baseline_json and windowed are filled in here and a goal is dropped."""
     from harness.tasks import registry
     from harness.verify import biz_api
 
@@ -314,8 +359,8 @@ def run_scored(task_id: str, config, confirm_policy, store, *, windowed: bool = 
     kwargs["windowed"] = windowed  # the runner's restore-retry cold boot uses it
     # Scored runs must not wander into the Play Store (installs, account prompts).
     kwargs["block_packages"] = (*SCORED_BLOCKED_PACKAGES, *kwargs.get("block_packages", ()))
-    return run_task(task_id, None, config, confirm_policy, device_factory=e.device_factory,
-                    inspector_factory=inspector_factory, emulator=e.emulator, store=store, **kwargs)
+    kwargs["inspector_factory"] = inspector_factory
+    return e, kwargs
 
 
 def main(argv: list[str] | None = None) -> None:

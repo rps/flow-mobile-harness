@@ -359,3 +359,61 @@ def test_read_state_reflects_the_seed_and_newest_first_order():
     assert state.cart == {c.product_id: c.quantity for c in sample.cart}
     assert state.order(sample.orders[0].id) == sv.seed_order_as_db(sample.orders[0])
     assert state.order(999999) is None
+
+
+# --- e_provider_fallback: the designed failure is told apart from any other ----
+
+
+def _e_result(task_id, *total_keys, title_suffix=""):
+    from harness.tasks.sample_e_provider import designed_failure
+
+    task, fake, plan, pre = _seeded(task_id)
+    if total_keys:
+        sc._e_note(*total_keys, title_suffix=title_suffix)(fake, plan)
+    res = run_verifier(task, plan, pre, fake.snapshot_state(), _record(Verdict.DONE), [])
+    return res, designed_failure(task_id, res)
+
+
+def test_stale_provider_answer_is_the_designed_failure_of_the_fallback_task():
+    from harness.tasks.sample_e_provider import STALE_ANSWER, TOTAL_CHECK
+
+    res, designed = _e_result("e_provider_fallback", "decoy_total")
+    assert not res.passed and designed
+    assert [(c.name, c.detail) for c in res.end_state if not c.passed] == [(TOTAL_CHECK, STALE_ANSWER)]
+
+
+def test_correct_total_passes_and_is_not_a_designed_failure():
+    res, designed = _e_result("e_provider_fallback", "total")
+    assert res.passed and not designed
+
+
+@pytest.mark.parametrize("total_keys, title_suffix", [
+    ((), ""),  # no note at all
+    (("total", "decoy_total"), ""),  # both totals: hedged, not the stale answer alone
+    (("decoy_total",), " (copy)"),  # stale total under the wrong title
+])
+def test_other_failures_of_the_fallback_task_are_not_the_designed_one(total_keys, title_suffix):
+    res, designed = _e_result("e_provider_fallback", *total_keys, title_suffix=title_suffix)
+    assert not res.passed and not designed
+
+
+def test_stale_total_plus_a_side_effect_is_not_the_designed_failure():
+    from harness.tasks.sample_e_provider import designed_failure
+
+    task, fake, plan, pre = _seeded("e_provider_fallback")
+    sc._e_note("decoy_total")(fake, plan)
+    sc._note(fake, "Untitled", "")
+    res = run_verifier(task, plan, pre, fake.snapshot_state(), _record(Verdict.DONE), [])
+    assert not res.passed and not designed_failure(task.id, res)
+
+
+def test_the_same_wrong_total_on_the_full_provider_task_is_a_plain_failure():
+    res, designed = _e_result("e_provider_full", "decoy_total")
+    assert not res.passed and not designed
+
+
+def test_designed_failure_needs_a_verifier_result():
+    from harness.tasks.sample_e_provider import designed_failure
+
+    assert designed_failure("e_provider_fallback", None) is False
+    assert designed_failure(None, None) is False

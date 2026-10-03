@@ -52,7 +52,7 @@ import statistics
 import threading
 import unicodedata
 from datetime import datetime, timezone
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -84,6 +84,7 @@ from harness.runner import (
 )
 from harness.scoreboard.aggregate import FAILURE_TAGS, load_runs_with_tags, load_tags, save_tags, scoreboard
 from harness.tasks import catalog, registry
+from harness.tasks.sample_e_provider import designed_failure
 from harness.trace.store import RunWriter, TraceStore
 
 log = logging.getLogger(__name__)
@@ -294,6 +295,17 @@ def _fake_script(task_id: str | None, goal: str | None) -> list[tuple[str, dict[
     return [*SCRIPT[:-1], step, SCRIPT[-1]]
 
 
+def _stop_if_online(online: Callable[[], bool], stop: Callable[[], None], serial: str) -> None:
+    """Stop the emulator the next run does not use. A failure here is logged
+    and the run goes ahead: it is slower with two emulators up, not wrong."""
+    try:
+        if online():
+            log.warning("stopping %s: the next run uses the other emulator", serial)
+            stop()
+    except Exception:
+        log.exception("could not stop %s before switching emulators", serial)
+
+
 class JobManager:
     def __init__(self, config: Config, *, allow_unblocked: bool, baseline_json: str | Path | None,
                  confirm_timeout_s: float) -> None:
@@ -479,14 +491,28 @@ class JobManager:
 
     # --- worker
 
-    def _env(self, fake: bool):
+    def _env(self, req: StartJob, meta: dict[str, Any]):
+        """The Env for a job and the run_task arguments that go with it. Real
+        business tasks run on the business profile's emulator and everything
+        else on the harness one; only one of the two is kept running, so the
+        other is stopped first (the VM cannot run two real runs' worth of
+        emulators at once, deploy/VM_STATE.md)."""
         from harness import cli
 
-        if fake:
-            return cli.fake_env(self.config)
+        if req.fake:
+            return cli.fake_env(self.config), {"baseline_json": self.baseline_json, "meta": meta}
+        from harness.emulator import manager  # bound to the harness AVD before the business profile loads
+        from harness.emulator.profiles import business
+
+        if req.task_id in business.TASK_IDS:
+            _stop_if_online(manager._online, manager.stop, manager.SERIAL)
+            return business.prepare_scored(req.task_id, self.config, windowed=False, meta=meta)
+        _stop_if_online(business.online, business.stop, business.SERIAL)
         if self._real_env is None:
             self._real_env = cli.real_env(self.config, windowed=False)
-        return self._real_env
+        elif not manager._online():  # stopped for a business run since the last harness run
+            manager.start(windowed=False)
+        return self._real_env, {"baseline_json": self.baseline_json, "meta": meta}
 
     def _work(self) -> None:
         while True:
@@ -513,10 +539,15 @@ class JobManager:
         from harness.fake_env import ScriptedClient
 
         req = job.req
-        env = self._env(req.fake)
+        script = _fake_script(req.task_id, req.goal) if req.fake else None
+        env, run_kwargs = self._env(req, {
+            "source": "web_ui", "job_id": job.id,
+            **({"requested_by": req.name} if req.name else {}),
+            **({"fake_confirm_step": FAKE_CONFIRM_NOTE} if script is not None else {})})
+        run_kwargs["meta"]["fake"] = env.fake
+        run_kwargs.setdefault("inspector_factory", env.inspector_factory)
         policy = self._ui_policy(job) if req.policy == "ui" else confirm_policy(req.policy)
         store = _ObservedStore(env.config.runs_dir, job)
-        script = _fake_script(req.task_id, req.goal) if req.fake else None
         device_factory = lambda: _CancellableDevice(env.device_factory(), job)  # noqa: E731
         for _ in range(req.repeat):
             if self.closing.is_set():
@@ -526,12 +557,9 @@ class JobManager:
             client = ScriptedClient(script) if script is not None else env.model_client_factory()
             run = run_task(
                 req.task_id, req.goal, env.config, policy,
-                device_factory=device_factory, inspector_factory=env.inspector_factory,
+                device_factory=device_factory,
                 emulator=env.emulator, store=store, model_client=client, settings=env.settings,
-                allow_unblocked=self.allow_unblocked, baseline_json=self.baseline_json,
-                meta={"fake": env.fake, "source": "web_ui", "job_id": job.id,
-                      **({"requested_by": req.name} if req.name else {}),
-                      **({"fake_confirm_step": FAKE_CONFIRM_NOTE} if script is not None else {})},
+                allow_unblocked=self.allow_unblocked, **run_kwargs,
             )
             job.emit("run_finished", _run_summary(run, Path(env.config.runs_dir)))
             job.run = None
@@ -591,6 +619,7 @@ def _run_summary(run: RunRecord, runs_dir: Path, tags: list[str] | None = None) 
         "agent_verdict": run.agent_verdict.value if run.agent_verdict else None,
         "agent_summary": run.agent_summary,
         "verifier_passed": None if vr is None else vr.passed,
+        "expected_fail": designed_failure(run.task_id, vr),
         "oracle_tier": None if vr is None else int(vr.oracle_tier),
         "termination_reason": run.termination_reason.value if run.termination_reason else None,
         "steps": run.meta.get("steps"),

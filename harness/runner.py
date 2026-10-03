@@ -15,6 +15,7 @@ per serial in runs_dir makes runs queue one at a time.
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import json
 import logging
@@ -37,6 +38,7 @@ from harness.contracts import (
     Device,
     DeviceError,
     FlowType,
+    RunLimits,
     RunRecord,
     Screenshot,
     StepRecord,
@@ -358,6 +360,16 @@ def serial_lock(runs_dir: str | Path, serial: str, timeout_s: float | None = Non
 # --- The sequence ----------------------------------------------------------------------
 
 
+def _apply_task_limits(limits: RunLimits, config: Config, settings: AgentSettings | None):
+    """The task's own caps in place of the Config ones. Explicit settings keep
+    every other knob; without settings run_agent takes the cap from Config."""
+    config = dataclasses.replace(config, max_steps=limits.max_steps, wall_clock_s=limits.wall_clock_s,
+                                 run_cap_usd=limits.run_cap_usd)
+    if settings is not None:
+        settings = dataclasses.replace(settings, per_run_cap_usd=limits.run_cap_usd)
+    return config, settings
+
+
 def run_task(
     task_id: str | None,
     goal: str | None,
@@ -395,6 +407,8 @@ def run_task(
     if (task_id is None) == (goal is None):
         raise ValueError("give exactly one of task_id or goal")
     task = registry.get(task_id) if task_id is not None else None
+    if task is not None and task.limits is not None:
+        config, settings = _apply_task_limits(task.limits, config, settings)
     policy = _as_policy(confirm_policy)
     baseline_json = BASELINE_JSON if baseline_json is None else baseline_json
     if task is None and not allow_unblocked and not host_loopback_blocked(baseline_json):
@@ -404,6 +418,8 @@ def run_task(
         )
     serial = serial or getattr(emulator, "SERIAL", "default")
     run_meta = {**(meta or {}), **policy.meta(), "serial": serial}
+    if task is not None and task.limits is not None:
+        run_meta["limits"] = dataclasses.asdict(task.limits)
     if task is None:
         run_meta["allow_unblocked"] = allow_unblocked
     blocked = set(BLOCKED_PACKAGES)
