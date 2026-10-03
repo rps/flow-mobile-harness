@@ -1,6 +1,6 @@
 # deploy/ — running the harness on the GCE VM
 
-Phase 2 Area F. Scripts and runbook to host the harness on `<VM>` (x86_64, KVM,
+Phase 2 Area F. Scripts and runbook to host the harness on a GCE VM (x86_64, KVM,
 Ubuntu 22.04) behind IAP for the owner and a tunnel-only ssh account for outside reviewers
 (`REVIEWER.md`). Real runs by default with confirmations auto-approved; the VM holds the API key
 (see "API key"). Nothing here touches a Mac emulator.
@@ -18,8 +18,9 @@ Ubuntu 22.04) behind IAP for the owner and a tunnel-only ssh account for outside
 | `REVIEWER.md` | | template of the reviewer's guide: plain `ssh -N -L` tunnel, no gcloud or Google account |
 | `check_emulator.sh` | VM | Throwaway AVD `cloud_check` on 5586: headless boot, adb root, iptables REJECT of 10.0.2.2, loopback probe, snapshot save/load timing; deletes the AVD |
 | `autostop/` | VM | systemd timer running `shutdown -h now` after IDLE_MINUTES without ssh connections or runs-dir writes; `install.sh` |
-| `RUNBOOK.md` | | start, push, bootstrap, test, serve, tunnel, harness baseline AVD (§6b), emulator check, auto-stop, stop, real runs with the key (§10), business profile on the VM (§11) |
-| `VM_STATE.md` | | inventory, reuse/replace decisions, measured results, timeline |
+| `private/env` | Mac | VM name, zone and project for `lib/gcloud.sh` (gitignored; copy `private.env.example`) |
+| `RUNBOOK.md` (owner-local, not in git) | | start, push, bootstrap, test, serve, tunnel, harness baseline AVD (§6b), emulator check, auto-stop, stop, real runs with the key (§10), business profile on the VM (§11) |
+| `VM_STATE.md` (owner-local, not in git) | | inventory, reuse/replace decisions, measured results, timeline |
 | AVD `cloud_business` (VM only, not a file) | VM | Play image `android-36.1;google_apis_playstore;x86_64`, port 5586, snapshot `business`: test Google account, TimeCamp + Insightly from Play, Invoice Ninja F-Droid APK, Markor; record in `~/.config/labs/business.json`. Selected with `LABS_BUSINESS_*` (RUNBOOK §11) |
 
 Decisions: Python 3.12 via deadsnakes rather than uv (no new tool on the VM, apt-managed, pyproject

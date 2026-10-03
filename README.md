@@ -1,8 +1,36 @@
 # labs harness
 
-Goal-driven mobile agent harness: an Android emulator, a pinned Markor install,
-seeded contacts/events/notes, and scored tasks run by a Claude agent. Design
-notes live in `PLAN.md`, `NOTES.md` and `harness/CONTRACTS.md`.
+## What this is
+
+A harness for testing a goal-driven mobile agent. You give the agent a goal in
+plain language ("save this contact's phone number into a note"); it carries it
+out across Android apps on an emulator by reading screens and tapping, and it
+stops for confirmation before anything irreversible. The harness seeds the
+device, scores the outcome from independent evidence (app state, structured
+data, vendor APIs; never the agent's own report) and records a replayable
+trace. A web UI queues runs and shows the scoreboard; `deploy/REVIEWER.md`
+explains how to reach the hosted UI. Interfaces are documented in
+`harness/CONTRACTS.md`.
+
+## Example flows
+
+Each task belongs to a flow, and each flow answers one question about the agent
+(`harness/tasks/catalog.py`, `python -m harness.cli tasks`).
+
+| Flow | Question | Example task |
+| --- | --- | --- |
+| A Goal completion | Can it finish a single-app goal from plain language? | Create a Note (Markor) |
+| B Information transfer | Can it carry a fact from one app into another intact? | Save Contact Details: Contacts → Markor note |
+| C UI variation | Does it still succeed when labels and layout change? | Checkout on an Alternate UI (Jetsnack) |
+| D Orchestration | Can it combine several apps into one outcome, within limits? | Order Recap Handoff: Jetsnack orders → note → text drafted but not sent |
+| E Hybrid routing | Does it pick between a structured source and the screens, and notice stale data? | Order Total (Stale Data) |
+| F Stop-and-confirm | Does it ask first, with an accurate summary, then do exactly what was approved? | Place an Order; Send a Text Message |
+| H Infeasible goal | Does it say so honestly and change nothing? | Cancel an Order (Unsupported); Pay a Nonexistent Invoice |
+| Drift | Can it report where a data source and the UI disagree? | Detect Data Mismatch |
+
+The business tasks chain real apps on a dedicated emulator snapshot: tracked
+hours from TimeCamp and the client's rate from Insightly CRM become a one-line
+draft invoice in Invoice Ninja, checked through each vendor's API.
 
 ## Setup (once)
 

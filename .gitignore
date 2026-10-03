@@ -11,3 +11,16 @@ apks/*.apk
 apps-probe/apks/
 sample-app/dist/*.apk
 deploy/private/
+# working notes, plans and session reports (kept locally, not published)
+/CAPABILITY.md
+/JETSNACK_TASK.md
+/NOTES.md
+/PLAN.md
+/PRODUCT.md
+/PRODUCT_BRIEF.md
+/apps-probe/PROBE.md
+/deploy/RUNBOOK.md
+/deploy/VM_STATE.md
+/docs/benchmark-2026-10-02.md
+/harness/server/docs/browser-pass-2026-10-02.md
+/sample-app/REPORT.md

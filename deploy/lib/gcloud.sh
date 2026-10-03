@@ -3,9 +3,12 @@
 # Owner access goes through IAP (gcloud ... --tunnel-through-iap). The only
 # public port is tcp:22 for the key-only reviewer account (reviewer/).
 
-LABS_VM="${LABS_VM:-<VM>}"
-LABS_ZONE="${LABS_ZONE:-us-east1-b}"
-LABS_PROJECT="${LABS_PROJECT:-<PROJECT>}"
+# VM identity comes from deploy/private/env (gitignored; see deploy/private.env.example).
+_labs_private_env="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/private/env"
+[ -f "$_labs_private_env" ] && . "$_labs_private_env"
+for _v in LABS_VM LABS_ZONE LABS_PROJECT; do
+  [ -n "${!_v:-}" ] || { echo "$_v is not set: create deploy/private/env from deploy/private.env.example" >&2; return 1 2>/dev/null || exit 1; }
+done
 # IAP returns 4047/4003 (ssh exit 255) for a minute or so after the VM starts.
 LABS_SSH_RETRIES="${LABS_SSH_RETRIES:-8}"
 
