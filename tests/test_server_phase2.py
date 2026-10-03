@@ -52,6 +52,12 @@ def restores(monkeypatch):
 
 
 @pytest.fixture
+def no_hook(monkeypatch):
+    """A runner without request_cancel (as before area B): the server's own fallback stops runs."""
+    monkeypatch.setattr(harness.runner, "request_cancel", None, raising=False)
+
+
+@pytest.fixture
 def slow_model(monkeypatch):
     """Scripted model that takes 0.25 s per call, so a cancel can land between steps."""
     real = ScriptedClient.create
@@ -63,7 +69,7 @@ def slow_model(monkeypatch):
     monkeypatch.setattr(ScriptedClient, "create", create)
 
 
-# --- cancel: server-side fallback (no runner hook, as on main) --------------------------
+# --- cancel through the runner's hook (harness.runner.request_cancel) ---------------------
 
 
 def test_cancel_at_confirmation_ends_run_with_error_trace_and_restores(srv, restores):
@@ -79,22 +85,23 @@ def test_cancel_at_confirmation_ends_run_with_error_trace_and_restores(srv, rest
     resolved = next(e["data"] for e in evs if e["event"] == "confirmation_resolved")
     assert resolved["decision"] == "reject" and resolved["by"] == "cancel"
     restore = next(e["data"] for e in evs if e["event"] == "restore")
-    assert restore == {"run_id": evs[-1]["data"]["run_ids"][0], "restore": "done", "by": "server"}
+    assert restore == {"run_id": evs[-1]["data"]["run_ids"][0], "restore": "done", "by": "runner"}
     done = evs[-1]["data"]
     assert done["status"] == "cancelled" and done["error"] is None and done["restore"] == "done"
     assert len(done["run_ids"]) == 1
 
     finished = next(e["data"] for e in evs if e["event"] == "run_finished")
-    assert finished["termination_reason"] == "error" and "JobCancelled" in finished["error"]
-    assert finished["cancelled"] is True and finished["restored_after_cancel"] is None
+    assert finished["termination_reason"] == "error" and "RunCancelled" in finished["error"]
+    assert finished["cancelled"] is True and finished["restored_after_cancel"] is True
     run, steps = TraceStore(srv.runs_dir).load_run(done["run_ids"][0])
     assert run.termination_reason is TerminationReason.ERROR and run.ended_at is not None
     assert run.agent_verdict is None  # the harness ended the run, not the agent
-    assert run.meta["job_id"] == job["job_id"] and run.meta["cancelled_by"] == app_module.CANCELLED_BY
+    assert run.meta["job_id"] == job["job_id"] and run.meta["cancelled"] is True
+    assert "cancelled_by" not in run.meta  # the server's fallback did not fire
     assert run.meta["ui_confirmations"] == [{"action": "send_sms", "decision": "reject", "by": "cancel"}]
     assert steps and steps[-1].tool_name == "request_confirmation"  # trace kept every step up to the cancel
     assert (srv.runs_dir / run.run_id / "replay.html").is_file()
-    assert restores == ["baseline", "baseline"]  # run start, then after the cancel
+    assert restores == ["baseline", "baseline"]  # run start, then the runner's restore after the cancel
 
     # a cancelled job is terminal: cancelling again or answering is refused
     assert srv.json(f"/api/jobs/{job['job_id']}/cancel", method="POST")[0] == 409
@@ -111,7 +118,8 @@ def test_cancel_between_steps_raises_at_next_device_call(srv, slow_model):
     kinds = [e["event"] for e in evs]
     assert "confirmation_resolved" not in kinds and kinds.count("run_started") == 1
     finished = next(e["data"] for e in evs if e["event"] == "run_finished")
-    assert finished["termination_reason"] == "error" and "JobCancelled" in finished["error"]
+    assert finished["termination_reason"] == "error" and "RunCancelled" in finished["error"]
+    assert finished["cancelled"] is True and finished["restored_after_cancel"] is True
     assert 0 < finished["steps"] < len(SCRIPT)
     assert evs[-1]["data"]["status"] == "cancelled" and evs[-1]["data"]["restore"] == "done"
 
@@ -146,13 +154,65 @@ def test_cancel_unknown_or_finished_job(srv):
     assert status == 409 and "done" in body["detail"]
 
 
-def test_restore_after_cancel_reports_busy_lock(srv, monkeypatch, restores):
-    @contextmanager
-    def busy(*a, **kw):
-        raise harness.runner.RunnerBusy("held by a test")
-        yield  # noqa: unreachable, keeps it a generator
+@contextmanager
+def _busy_lock(*a, **kw):
+    raise harness.runner.RunnerBusy("held by a test")
+    yield  # noqa: unreachable, keeps it a generator
 
-    monkeypatch.setattr(app_module, "serial_lock", busy)
+
+def test_restore_after_cancel_reports_busy_lock(srv, monkeypatch, restores):
+    """With the hook, the runner restores inside its own run; the server's lock is never taken."""
+    monkeypatch.setattr(app_module, "serial_lock", _busy_lock)
+    job = _start(srv, task_id="f_send_sms", policy="ui")
+    _wait_pending(srv, job["job_id"])
+    srv.json(f"/api/jobs/{job['job_id']}/cancel", method="POST")
+    evs = srv.events(job["job_id"])
+    restore = next(e["data"] for e in evs if e["event"] == "restore")
+    assert restore["restore"] == "done" and restore["by"] == "runner"
+    assert evs[-1]["data"]["status"] == "cancelled" and restores == ["baseline", "baseline"]
+
+
+# --- cancel: server-side fallback when the runner has no request_cancel -----------------------
+
+
+def test_fallback_cancel_at_confirmation_raises_in_wrapper_and_server_restores(srv, restores, no_hook):
+    job = _start(srv, task_id="f_send_sms", policy="ui", repeat=3)
+    _wait_pending(srv, job["job_id"])
+    srv.json(f"/api/jobs/{job['job_id']}/cancel", method="POST")
+    evs = srv.events(job["job_id"])
+    kinds = [e["event"] for e in evs]
+    assert kinds.count("run_started") == 1 and kinds.count("run_finished") == 1, kinds
+    resolved = next(e["data"] for e in evs if e["event"] == "confirmation_resolved")
+    assert resolved["decision"] == "reject" and resolved["by"] == "cancel"
+    finished = next(e["data"] for e in evs if e["event"] == "run_finished")
+    assert finished["termination_reason"] == "error" and "JobCancelled" in finished["error"]
+    assert finished["cancelled"] is True and finished["restored_after_cancel"] is None
+    restore = next(e["data"] for e in evs if e["event"] == "restore")
+    assert restore == {"run_id": finished["run_id"], "restore": "done", "by": "server"}
+    done = evs[-1]["data"]
+    assert done["status"] == "cancelled" and done["restore"] == "done" and len(done["run_ids"]) == 1
+    run, steps = TraceStore(srv.runs_dir).load_run(finished["run_id"])
+    assert run.termination_reason is TerminationReason.ERROR and run.agent_verdict is None
+    assert run.meta["cancelled_by"] == app_module.CANCELLED_BY and "cancelled" not in run.meta
+    assert steps[-1].tool_name == "request_confirmation" and (srv.runs_dir / run.run_id / "replay.html").is_file()
+    assert restores == ["baseline", "baseline"]  # run start, then the server's restore
+
+
+def test_fallback_cancel_between_steps_raises_at_next_device_call(srv, slow_model, no_hook):
+    job = _start(srv, task_id="a_markor_note", policy="approve", repeat=2)
+    _wait_event(srv, job["job_id"], "step")
+    assert srv.json(f"/api/jobs/{job['job_id']}/cancel", method="POST")[0] == 200
+    evs = srv.events(job["job_id"])
+    kinds = [e["event"] for e in evs]
+    assert "confirmation_resolved" not in kinds and kinds.count("run_started") == 1
+    finished = next(e["data"] for e in evs if e["event"] == "run_finished")
+    assert finished["termination_reason"] == "error" and "JobCancelled" in finished["error"]
+    assert 0 < finished["steps"] < len(SCRIPT)
+    assert evs[-1]["data"]["status"] == "cancelled" and evs[-1]["data"]["restore"] == "done"
+
+
+def test_fallback_restore_after_cancel_reports_busy_lock(srv, monkeypatch, restores, no_hook):
+    monkeypatch.setattr(app_module, "serial_lock", _busy_lock)
     job = _start(srv, task_id="f_send_sms", policy="ui")
     _wait_pending(srv, job["job_id"])
     srv.json(f"/api/jobs/{job['job_id']}/cancel", method="POST")
