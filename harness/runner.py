@@ -368,6 +368,7 @@ def run_task(
     meta: dict[str, Any] | None = None,
     allow_packages: Iterable[str] = (),
     windowed: bool = False,
+    block_packages: Iterable[str] = (),
 ) -> RunRecord:
     """Run one task (task_id) or one freeform goal (goal); exactly one is given.
 
@@ -375,6 +376,8 @@ def run_task(
     start(windowed=) a failed restore is retried once after a cold boot
     (`windowed` is passed to that start; callers with a window pass True).
     `allow_packages` lifts BLOCKED_PACKAGES entries for a freeform run only.
+    `block_packages` adds to the blocked set for any run and is applied after
+    `allow_packages`, so it cannot be lifted.
     meta["job_id"], if given, is a key for request_cancel(). Returns the
     finished RunRecord; failures inside the sequence are recorded as
     termination ERROR, not raised.
@@ -396,6 +399,7 @@ def run_task(
     blocked = set(BLOCKED_PACKAGES)
     if task is None:
         blocked -= set(allow_packages)
+    blocked |= set(block_packages)
     run_meta["blocked_packages"] = sorted(blocked)
     job_keys = [str(run_meta["job_id"])] if run_meta.get("job_id") is not None else []
     active = _Active(run_meta)
@@ -464,9 +468,39 @@ def _set_chrome(inspector: Any, blocked: set[str], run_meta: dict[str, Any]) -> 
         log.warning("could not enable %s: %s", CHROME, e)
 
 
+def _set_blocked_packages(inspector: Any, blocked: set[str], run_meta: dict[str, Any], scored: bool) -> None:
+    """_set_chrome, then for a scored run also disable every other blocked
+    package (`pm disable-user --user 0`) as a second layer behind the open_app
+    gate; the next baseline restore brings them back. Freeform runs keep the
+    Chrome-only behaviour. Records meta["disabled_packages"] = {package: True
+    or reason} for scored runs and fails closed like Chrome: a package that
+    cannot be disabled ends the run unless meta["fake"] is set.
+    """
+    _set_chrome(inspector, blocked, run_meta)
+    if not scored:
+        return
+    results: dict[str, Any] = {}
+    run_meta["disabled_packages"] = results
+    if CHROME in blocked:
+        results[CHROME] = run_meta["chrome_disabled"]
+    shell = getattr(inspector, "shell", None)
+    for pkg in sorted(blocked - {CHROME}):
+        if not callable(shell):
+            results[pkg] = "unsupported: inspector has no shell"
+            if not run_meta.get("fake"):
+                raise DeviceError(f"cannot disable {pkg}: inspector has no shell")
+            continue
+        try:
+            shell(["pm", "disable-user", "--user", "0", pkg])
+        except Exception as e:
+            results[pkg] = f"{type(e).__name__}: {e}"
+            raise DeviceError(f"cannot disable {pkg}, refusing to run scored: {e}") from e
+        results[pkg] = True
+
+
 def _check_baseline(emulator: Any, run_meta: dict[str, Any], baseline_json: str | Path) -> None:
     """Fail closed if the emulator can compare the run's baseline.json with the
-    running device and finds drift (wrong AVD, image, missing snapshot, Markor
+    running device and finds drift (wrong AVD, image, missing snapshot, Markor or sample-app
     sha). Emulators without the check (fakes) are recorded as unchecked."""
     check = getattr(emulator, "check_baseline_matches", None)
     if not callable(check):
@@ -520,7 +554,7 @@ def _sequence(task, goal, config, policy, run_meta, device_factory, inspector_fa
         stage = "seed"
         check_cancel()
         inspector = inspector_factory()
-        _set_chrome(inspector, blocked, run_meta)
+        _set_blocked_packages(inspector, blocked, run_meta, scored=task is not None)
         plan = None
         if task is not None:
             seed_used = make_seed() if seed is None else seed

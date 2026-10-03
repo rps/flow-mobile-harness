@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import io
 import re
-import shlex
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -17,7 +16,7 @@ from typing import Any
 from PIL import Image
 
 from harness.contracts import Config, DeviceError, QueryNotAllowed, Screenshot
-from harness.device.adb_shell import adb
+from harness.device.adb_shell import adb, shell
 
 PACKAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$")
 BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
@@ -116,7 +115,7 @@ class AdbDevice:
     # --- helpers -------------------------------------------------------------
 
     def _shell(self, *args: str, timeout: float = 30.0) -> str:
-        return adb(self.serial, "shell", " ".join(shlex.quote(a) for a in args), timeout=timeout)
+        return shell(self.serial, *args, timeout=timeout)
 
     def _real_size(self) -> tuple[int, int]:
         if self._size is None:

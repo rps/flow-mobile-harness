@@ -459,6 +459,35 @@ def test_chrome_is_blocked_for_scored_tasks_even_if_allowed(rec):
     assert run.termination_reason is TerminationReason.FINISHED
 
 
+VENDING = [("open_app", {"package": "com.android.vending"}), ("open_app", {"package": "net.gsantner.markor"}),
+           ("finish", {"verdict": "done", "summary": "done"})]
+
+
+def test_block_packages_merge_with_default_and_allow_cannot_lift_them_on_scored_runs(rec):
+    run = _run(rec, client=ScriptedClient(VENDING), block_packages=["com.android.vending"],
+               allow_packages=["com.android.vending", "com.android.chrome"])
+    assert run.meta["blocked_packages"] == ["com.android.chrome", "com.android.vending"]
+    assert rec.inspector.shell_calls == [["pm", "disable-user", "--user", "0", "com.android.chrome"],
+                                         ["pm", "disable-user", "--user", "0", "com.android.vending"]]
+    assert run.meta["disabled_packages"] == {"com.android.chrome": True, "com.android.vending": True}
+    assert [c for c in rec.devices[0].calls if c[0] == "open_app"] == [("open_app", "net.gsantner.markor")]
+    _, steps = _on_disk(rec, run)
+    assert steps[0].tool_result == {"error": "open_app failed: com.android.vending is not allowed in this run"}
+    assert run.termination_reason is TerminationReason.FINISHED
+
+
+def test_allow_packages_cannot_lift_block_packages_on_freeform_either(rec, tmp_path):
+    bj = tmp_path / "baseline.json"
+    bj.write_text(json.dumps({"host_loopback_blocked": True}))
+    run = _run(rec, task_id=None, goal="browse", client=ScriptedClient(VENDING), baseline_json=bj,
+               block_packages=["com.android.vending"], allow_packages=["com.android.vending", "com.android.chrome"])
+    assert run.meta["blocked_packages"] == ["com.android.vending"]  # chrome lifted, vending not
+    # Freeform keeps the Chrome-only device step: vending is gated at open_app, not disabled.
+    assert rec.inspector.shell_calls == [["pm", "enable", "com.android.chrome"]]
+    assert "disabled_packages" not in run.meta
+    assert [c for c in rec.devices[0].calls if c[0] == "open_app"] == [("open_app", "net.gsantner.markor")]
+
+
 def test_freeform_may_allow_chrome(rec, tmp_path):
     bj = tmp_path / "baseline.json"
     bj.write_text(json.dumps({"host_loopback_blocked": True}))
@@ -494,6 +523,32 @@ def test_chrome_enable_failure_on_freeform_only_warns(rec, tmp_path):
     run = _run(rec, task_id=None, goal="browse", baseline_json=bj, allow_packages=["com.android.chrome"])
     assert run.meta["chrome_disabled"] == "DeviceError: pm: permission denied"
     assert run.termination_reason is TerminationReason.FINISHED
+
+
+def test_extra_package_disable_failure_fails_the_scored_run_closed(rec):
+    calls = []
+
+    def shell(argv, timeout=30.0):
+        calls.append(argv)
+        if argv[-1] == "com.android.vending":
+            raise DeviceError("pm: Unknown package")
+        return ""
+
+    rec.inspector.shell = shell
+    run = _run(rec, block_packages=["com.android.vending"])
+    assert [c[-1] for c in calls] == ["com.android.chrome", "com.android.vending"]
+    assert run.meta["disabled_packages"] == {"com.android.chrome": True,
+                                             "com.android.vending": "DeviceError: pm: Unknown package"}
+    assert run.termination_reason is TerminationReason.ERROR
+    assert run.meta["error"].startswith("seed: DeviceError: cannot disable com.android.vending")
+    assert "agent_start" not in rec.log and run.verifier_result is None
+
+
+def test_extra_package_without_shell_fails_scored_run_unless_fake(rec):
+    rec.inspector.shell = None
+    fake_run = _run(rec, block_packages=["com.android.vending"], meta={"fake": True})
+    assert fake_run.meta["disabled_packages"]["com.android.vending"] == "unsupported: inspector has no shell"
+    assert fake_run.termination_reason is TerminationReason.FINISHED
 
 
 def test_inspector_without_shell_fails_scored_run_unless_fake(rec):

@@ -78,6 +78,19 @@ def test_run_scored_never_passes_a_goal_and_pins_baseline(monkeypatch):
     assert out == "record"
     assert seen["goal"] is None and seen["baseline_json"] == business.BASELINE_JSON
     assert seen["meta"] == {"k": 1, "profile": "business"}
+    assert tuple(seen["block_packages"]) == ("com.android.vending",)
+
+
+def test_run_scored_keeps_caller_block_packages_alongside_play_store(monkeypatch):
+    seen = {}
+
+    class FakeEnv:
+        device_factory = inspector_factory = emulator = object()
+
+    monkeypatch.setattr("harness.runner.run_task", lambda task_id, goal, config, policy, **kw: seen.update(kw))
+    monkeypatch.setattr(business, "env", lambda config, windowed=True: FakeEnv())
+    business.run_scored("biz_h", object(), "approve", store="store", block_packages=["org.example.x"])
+    assert sorted(seen["block_packages"]) == ["com.android.vending", "org.example.x"]
 
 
 def test_restore_snapshot_rejects_other_names(monkeypatch):

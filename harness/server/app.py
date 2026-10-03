@@ -177,9 +177,10 @@ def _request_runner_cancel(job: Job) -> bool:
     is started with meta["job_id"], so the job id is the key. True means the
     runner owns this cancel: it ends the active run (termination ERROR,
     meta["cancelled"]) and restores baseline itself (meta["restored_after_cancel"]).
-    A missing hook (main today), False, or an error leaves the server-side
-    fallback in charge: the wrapped device raises at its next call and the
-    worker restores baseline under the serial lock. Waived limitation of the
+    The hook is present on main. False, an error, or a runner module without
+    the hook (the no-hook case) leaves the server-side fallback in charge: the
+    wrapped device raises at its next call and the worker restores baseline
+    under the serial lock. Waived limitation of the
     fallback (not of the hook): the exception travels up through the agent
     loop, so the in-flight step's usage and cost are not accounted; the hook
     stops at the runner's gate and keeps them."""

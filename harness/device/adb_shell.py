@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -29,3 +30,9 @@ def adb(serial: str, *args: str, timeout: float = 30.0, binary: bool = False) ->
         err = (proc.stderr or proc.stdout).decode(errors="replace").strip()
         raise DeviceError(f"adb {' '.join(args)} failed ({proc.returncode}): {err}")
     return proc.stdout if binary else proc.stdout.decode(errors="replace")
+
+
+def shell(serial: str, *args: str, timeout: float = 30.0) -> str:
+    """Run one command in the device shell. Each argument is shlex-quoted, so
+    it reaches the command as a single word whatever it contains."""
+    return adb(serial, "shell", " ".join(shlex.quote(a) for a in args), timeout=timeout)

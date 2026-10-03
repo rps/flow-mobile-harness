@@ -114,3 +114,62 @@ def test_run_adb_raises_on_missing_binary(monkeypatch):
     monkeypatch.setattr(adb_shell, "ADB", "/nonexistent/adb")
     with pytest.raises(AdbError, match="could not run"):
         ins.run_adb("e", ["devices"])
+
+
+def _capture_adb(monkeypatch, reply="out"):
+    from harness.device import adb_shell
+    calls = []
+
+    def fake(serial, *args, timeout=30.0, binary=False):
+        calls.append((serial, args, timeout))
+        return reply
+
+    monkeypatch.setattr(adb_shell, "adb", fake)
+    return calls
+
+
+def test_adb_shell_quotes_each_argument_as_one_device_word(monkeypatch):
+    from harness.device.adb_shell import shell
+    calls = _capture_adb(monkeypatch)
+    hostile = "a b; rm -rf /sdcard 'x' $(id)"
+    assert shell("emulator-5554", "input", "text", hostile) == "out"
+    (serial, args, timeout), = calls
+    assert serial == "emulator-5554" and args[0] == "shell" and len(args) == 2 and timeout == 30.0
+    assert shlex.split(args[1]) == ["input", "text", hostile]
+
+
+def test_adb_shell_passes_timeout_and_propagates_device_errors(monkeypatch):
+    from harness.contracts import DeviceError
+    from harness.device import adb_shell
+    calls = _capture_adb(monkeypatch)
+    adb_shell.shell("s", "true", timeout=7.5)
+    assert calls[0][2] == 7.5
+
+    def failing(*a, **kw):
+        raise DeviceError("adb shell failed (1): boom")
+
+    monkeypatch.setattr(adb_shell, "adb", failing)
+    with pytest.raises(DeviceError, match="boom"):
+        adb_shell.shell("s", "false")
+
+
+def test_private_shell_wrappers_route_through_adb_shell_with_their_defaults(monkeypatch):
+    from harness.device.adb import AdbDevice
+    from harness.emulator import manager
+    from harness.emulator.profiles import business
+    from harness.verify.biz_readback import BizReadback
+    calls = _capture_adb(monkeypatch)
+    manager._shell("getprop", "a b")
+    business._shell("pm", "path", "x")
+    dev = AdbDevice.__new__(AdbDevice)
+    dev.serial = "dev"
+    dev._shell("wm", "size")
+    rb = BizReadback.__new__(BizReadback)
+    rb.serial = "rb"
+    rb._shell("ls")
+    assert [(s, shlex.split(a[1]), t) for s, a, t in calls] == [
+        (manager.SERIAL, ["getprop", "a b"], 30.0),
+        (business.SERIAL, ["pm", "path", "x"], 30.0),
+        ("dev", ["wm", "size"], 30.0),
+        ("rb", ["ls"], 60.0),
+    ]

@@ -27,14 +27,13 @@ from __future__ import annotations
 
 import logging
 import re
-import shlex
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from harness.contracts import DeviceError
-from harness.device.adb_shell import adb
+from harness.device.adb_shell import adb, shell
 from harness.device.inspect import DEFAULT_MARKOR_DIR, DeviceState, Inspector
 
 log = logging.getLogger(__name__)
@@ -249,7 +248,7 @@ class BizReadback:
         self.settle_s = settle_s
 
     def _shell(self, *args: str, timeout: float = 60.0) -> str:
-        return adb(self.serial, "shell", " ".join(shlex.quote(a) for a in args), timeout=timeout)
+        return shell(self.serial, *args, timeout=timeout)
 
     def nodes(self) -> list[dict]:
         """One uiautomator dump, retried: 'could not get idle state' is a

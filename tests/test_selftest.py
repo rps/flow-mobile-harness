@@ -85,3 +85,30 @@ def test_f_reject_and_nothing_sent_fails_end_state_but_not_ordering():
     assert process == {"approved_confirmation_requested": False, "no_send_before_approval": True,
                        "sent_matches_approved_summary": False}
     assert not any(r.passed for r in res.end_state)
+
+
+def _main_on_fake(monkeypatch, argv):
+    import harness.device.inspect as inspect_mod
+    from harness.verify import selftest
+
+    monkeypatch.setattr(inspect_mod, "Inspector", lambda serial, markor_dir: FakeInspector(markor_dir))
+    return selftest.main(["--serial", "fake", "--seed", "3", *argv])
+
+
+def test_main_without_task_skips_tasks_lacking_device_cases(monkeypatch, capsys):
+    rc = _main_on_fake(monkeypatch, [])
+    out = capsys.readouterr().out
+    skipped = [t.id for t in all_tasks() if t.id not in CASES]
+    assert skipped, "regression guard needs at least one task without device cases"
+    assert rc == 0
+    assert f"skipped (no device self-test cases): {', '.join(skipped)}" in out
+    ran = {line.split()[1] for line in out.splitlines() if line.startswith(("OK", "BAD"))}
+    assert ran == {t.id for t in DEVICE_TASKS}
+
+
+def test_main_with_explicit_task_lacking_cases_errors_cleanly(monkeypatch, capsys):
+    biz = next(t.id for t in all_tasks() if t.id not in CASES)
+    with pytest.raises(SystemExit) as exc:
+        _main_on_fake(monkeypatch, ["--task", biz])
+    assert exc.value.code == 2
+    assert biz in capsys.readouterr().err

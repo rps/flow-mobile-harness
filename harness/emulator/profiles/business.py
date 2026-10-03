@@ -39,7 +39,7 @@ from pathlib import Path
 from types import ModuleType
 
 from harness.contracts import DeviceError
-from harness.device.adb_shell import adb
+from harness.device.adb_shell import adb, shell
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ SYSTEM_IMAGE = "system-images;android-36.1;google_apis_playstore;arm64-v8a"
 FREEFORM_ALLOWED = False
 HERE = Path(__file__).resolve().parent
 BASELINE_JSON = HERE / "business.json"
+SCORED_BLOCKED_PACKAGES = ("com.android.vending",)
 ENV = {"LABS_AVD_NAME": AVD_NAME, "LABS_AVD_PORT": str(PORT), "LABS_SYSTEM_IMAGE": SYSTEM_IMAGE}
 ENV_PREFIX = " ".join(f"{k}={shlex.quote(v)}" for k, v in ENV.items())
 APPS = {
@@ -131,7 +132,7 @@ def assert_scored(task_id: str | None, goal: str | None, baseline_json: str | Pa
 
 
 def _shell(*args: str) -> str:
-    return adb(SERIAL, "shell", " ".join(shlex.quote(a) for a in args))
+    return shell(SERIAL, *args)
 
 
 def _app_versions() -> dict[str, dict[str, str]]:
@@ -214,6 +215,8 @@ def run_scored(task_id: str, config, confirm_policy, store, *, windowed: bool = 
     kwargs.pop("goal", None)
     kwargs["baseline_json"] = BASELINE_JSON
     kwargs["windowed"] = windowed  # the runner's restore-retry cold boot uses it
+    # Scored runs must not wander into the Play Store (installs, account prompts).
+    kwargs["block_packages"] = (*SCORED_BLOCKED_PACKAGES, *kwargs.get("block_packages", ()))
     kwargs.setdefault("meta", {})["profile"] = "business"
     return run_task(task_id, None, config, confirm_policy, device_factory=e.device_factory,
                     inspector_factory=e.inspector_factory, emulator=e.emulator, store=store, **kwargs)

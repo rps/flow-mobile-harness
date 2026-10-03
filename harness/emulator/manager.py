@@ -15,7 +15,6 @@ import hashlib
 import json
 import logging
 import os
-import shlex
 import socket
 import subprocess
 import tempfile
@@ -25,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from harness.contracts import DeviceError
-from harness.device.adb_shell import ADB, SDK, adb
+from harness.device.adb_shell import ADB, SDK, adb, shell
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +80,7 @@ MARKOR_PACKAGE = "net.gsantner.markor"
 MARKOR_VERSION = "2.16.1"
 MARKOR_APK = REPO / "apks" / "net.gsantner.markor-v163-2.16.1-flavorDefault-release.apk"
 MARKOR_SHA256 = "e88cdcced7aa3dca25e6b9c7a9bdcfad3e3988ee545be951f42bf9441b5e46bf"
+SAMPLE_APP_PACKAGE = "com.labs.snackorders"  # default when baseline.json's sample_app has no package
 # Markor's default notebook (pref file_browser_last_browsed_folder after first launch).
 # Exists, empty, in the baseline; Markor has no all-files access until granted.
 MARKOR_NOTEBOOK = "/storage/emulated/0/Documents/markor"
@@ -97,7 +97,7 @@ def _run(cmd: list[str], timeout: float = 120.0, stdin: str | None = None) -> st
 
 
 def _shell(*args: str, timeout: float = 30.0) -> str:
-    return adb(SERIAL, "shell", " ".join(shlex.quote(a) for a in args), timeout=timeout)
+    return shell(SERIAL, *args, timeout=timeout)
 
 
 def _online(serial: str = SERIAL) -> bool:
@@ -412,7 +412,9 @@ def block_host_loopback() -> tuple[bool, bool]:
 def check_baseline_matches(path: Path = BASELINE_JSON) -> dict:
     """Fail closed unless baseline.json describes this configuration and the
     running device: avd, serial, system_image, snapshot present, Markor
-    installed with the pinned sha256. Returns what was checked."""
+    installed with the pinned sha256, and, when baseline.json has a
+    `sample_app` entry, the sample app installed with its recorded sha256.
+    Returns what was checked."""
     try:
         info = json.loads(Path(path).read_text())
     except (OSError, ValueError) as exc:
@@ -432,21 +434,36 @@ def check_baseline_matches(path: Path = BASELINE_JSON) -> dict:
     recorded_sha = (info.get("markor") or {}).get("sha256")
     if recorded_sha != MARKOR_SHA256:
         problems.append(f"baseline.json markor.sha256={recorded_sha!r} != pinned {MARKOR_SHA256!r}")
+    sha = _check_installed_sha(MARKOR_PACKAGE, MARKOR_SHA256, "pinned", problems)
+    checked = {"avd": name, "serial": SERIAL, "system_image": SYSTEM_IMAGE, "snapshot": snapshot, "markor_sha256": sha}
+    if "sample_app" in info:
+        sample = info["sample_app"] or {}
+        want = sample.get("sha256")
+        if not isinstance(want, str) or not want:
+            problems.append(f"baseline.json sample_app has no sha256: {info['sample_app']!r}")
+        else:
+            package = sample.get("package") or SAMPLE_APP_PACKAGE
+            checked["sample_app_sha256"] = _check_installed_sha(package, want, "recorded", problems)
+    if problems:
+        raise DeviceError(f"baseline does not match the device: {'; '.join(problems)}")
+    return checked
+
+
+def _check_installed_sha(package: str, want: str, label: str, problems: list[str]) -> str | None:
+    """sha256 of the installed base APK of `package`, or None if it is not
+    installed; a missing package or a different hash is appended to problems."""
     try:  # `pm path` exits non-zero for a package that is not installed
-        apk = _shell("pm", "path", MARKOR_PACKAGE).strip().removeprefix("package:").splitlines()
+        apk = _shell("pm", "path", package).strip().removeprefix("package:").splitlines()
     except DeviceError:
         apk = []
     if not apk or not apk[0]:
-        problems.append(f"{MARKOR_PACKAGE} is not installed")
-        sha = None
-    else:
-        digest = _shell("sha256sum", apk[0]).split()
-        sha = digest[0] if digest else ""
-        if sha != MARKOR_SHA256:
-            problems.append(f"{MARKOR_PACKAGE} sha256 {sha!r} != pinned {MARKOR_SHA256!r}")
-    if problems:
-        raise DeviceError(f"baseline does not match the device: {'; '.join(problems)}")
-    return {"avd": name, "serial": SERIAL, "system_image": SYSTEM_IMAGE, "snapshot": snapshot, "markor_sha256": sha}
+        problems.append(f"{package} is not installed")
+        return None
+    digest = _shell("sha256sum", apk[0]).split()
+    sha = digest[0] if digest else ""
+    if sha != want:
+        problems.append(f"{package} sha256 {sha!r} != {label} {want!r}")
+    return sha
 
 
 def record_stock_apps() -> list[str]:

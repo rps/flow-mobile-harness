@@ -7,6 +7,7 @@ import pytest
 from harness.contracts import DeviceError
 from harness.emulator import manager
 
+SAMPLE_SHA = "a" * 64
 IMG_DIR = manager.SYSTEM_IMAGE_DIR.as_posix()
 API = "36.1"
 
@@ -29,8 +30,12 @@ class Device:
     """Canned replies for _shell / _emu / _run."""
 
     def __init__(self, monkeypatch, *, avd=None, sdk="36", abi="arm64-v8a", snapshots=("baseline",),
-                 apk="/data/app/x/base.apk", sha=manager.MARKOR_SHA256, list_avds=None):
+                 apk="/data/app/x/base.apk", sha=manager.MARKOR_SHA256, list_avds=None,
+                 sample_apk="/data/app/s/base.apk", sample_sha=SAMPLE_SHA, sample_package=None):
         self.avd = manager.AVD_NAME if avd is None else avd
+        self.sample_apk, self.sample_sha = sample_apk, sample_sha
+        self.shell_calls: list[tuple] = []
+        self.sample_package = sample_package or manager.SAMPLE_APP_PACKAGE
         self.sdk, self.abi, self.snapshots, self.apk, self.sha = sdk, abi, list(snapshots), apk, sha
         self.list_avds = [manager.AVD_NAME] if list_avds is None else list_avds
         self.emu_calls: list[tuple] = []
@@ -40,16 +45,19 @@ class Device:
         monkeypatch.setattr(manager, "_wait_responsive", lambda timeout: None)
 
     def shell(self, *args, timeout=30.0):
+        self.shell_calls.append(args)
         if args == ("getprop", "ro.build.version.sdk"):
             return self.sdk + "\n"
         if args == ("getprop", "ro.product.cpu.abi"):
             return self.abi + "\n"
         if args[:2] == ("pm", "path"):
-            if not self.apk:
-                raise DeviceError("adb shell pm path net.gsantner.markor failed (1): ")
-            return f"package:{self.apk}\n"
+            apk = {manager.MARKOR_PACKAGE: self.apk, self.sample_package: self.sample_apk}[args[2]]
+            if not apk:
+                raise DeviceError(f"adb shell pm path {args[2]} failed (1): ")
+            return f"package:{apk}\n"
         if args[0] == "sha256sum":
-            return f"{self.sha}  {args[1]}\n"
+            sha = {self.apk: self.sha, self.sample_apk: self.sample_sha}[args[1]]
+            return f"{sha}  {args[1]}\n"
         raise AssertionError(args)
 
     def adb(self, serial, *args, timeout=120.0, **kw):
@@ -200,6 +208,60 @@ def test_baseline_drift_fails_closed(tmp_path, monkeypatch, override, device, ne
     Device(monkeypatch, **device)
     with pytest.raises(DeviceError, match=needle):
         manager.check_baseline_matches(_baseline(tmp_path, **override))
+
+
+SAMPLE = {"package": "com.labs.snackorders", "sha256": SAMPLE_SHA}
+
+
+def test_sample_app_package_matches_the_seed_adapter():
+    from harness.seed.sample_app import PACKAGE
+    assert manager.SAMPLE_APP_PACKAGE == PACKAGE
+
+
+def test_baseline_with_sample_app_checks_its_installed_hash(tmp_path, monkeypatch):
+    dev = Device(monkeypatch)
+    out = manager.check_baseline_matches(_baseline(tmp_path, sample_app=SAMPLE))
+    assert out["sample_app_sha256"] == SAMPLE_SHA and out["markor_sha256"] == manager.MARKOR_SHA256
+    # The hash came from the device, not from baseline.json.
+    assert ("pm", "path", manager.SAMPLE_APP_PACKAGE) in dev.shell_calls
+    assert ("sha256sum", dev.sample_apk) in dev.shell_calls
+
+
+def test_sample_app_package_is_read_from_baseline_when_recorded(tmp_path, monkeypatch):
+    dev = Device(monkeypatch, sample_package="com.example.renamed")
+    out = manager.check_baseline_matches(
+        _baseline(tmp_path, sample_app={"package": "com.example.renamed", "sha256": SAMPLE_SHA}))
+    assert out["sample_app_sha256"] == SAMPLE_SHA
+    assert ("pm", "path", "com.example.renamed") in dev.shell_calls
+    assert ("pm", "path", manager.SAMPLE_APP_PACKAGE) not in dev.shell_calls
+
+
+def test_baseline_without_sample_app_never_queries_it(tmp_path, monkeypatch):
+    dev = Device(monkeypatch)
+    assert "sample_app_sha256" not in manager.check_baseline_matches(_baseline(tmp_path))
+    assert not [c for c in dev.shell_calls if manager.SAMPLE_APP_PACKAGE in c or dev.sample_apk in c]
+
+
+@pytest.mark.parametrize("sample,device,needle", [
+    (SAMPLE, {"sample_apk": ""}, "com.labs.snackorders is not installed"),
+    (SAMPLE, {"sample_sha": "0" * 64}, "com.labs.snackorders sha256 '0000"),
+    ({"package": "com.labs.snackorders"}, {}, "sample_app has no sha256"),
+    ({"package": "com.labs.snackorders", "sha256": ""}, {}, "sample_app has no sha256"),
+    ({"package": "com.labs.snackorders", "sha256": 123}, {}, "sample_app has no sha256"),
+    (None, {}, "sample_app has no sha256"),
+])
+def test_sample_app_drift_fails_closed(tmp_path, monkeypatch, sample, device, needle):
+    Device(monkeypatch, **device)
+    with pytest.raises(DeviceError, match=needle):
+        manager.check_baseline_matches(_baseline(tmp_path, sample_app=sample))
+
+
+def test_sample_app_and_markor_problems_are_reported_together(tmp_path, monkeypatch):
+    Device(monkeypatch, sha="1" * 64, sample_sha="2" * 64)
+    with pytest.raises(DeviceError) as exc:
+        manager.check_baseline_matches(_baseline(tmp_path, sample_app=SAMPLE))
+    assert "net.gsantner.markor sha256 '1111" in str(exc.value)
+    assert "com.labs.snackorders sha256 '2222" in str(exc.value)
 
 
 def test_missing_baseline_json_fails_closed(tmp_path, monkeypatch):

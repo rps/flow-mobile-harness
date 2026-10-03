@@ -233,7 +233,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     insp = Inspector(args.serial, args.markor_dir)
-    tasks = [get(t) for t in args.task] if args.task else all_tasks()
+    if args.task:
+        missing = [t for t in args.task if t not in CASES]
+        if missing:
+            ap.error(f"no device self-test cases for: {', '.join(missing)}")
+        tasks = [get(t) for t in args.task]
+    else:
+        tasks = [t for t in all_tasks() if t.id in CASES]
+        skipped = [t.id for t in all_tasks() if t.id not in CASES]
+        if skipped:
+            print(f"skipped (no device self-test cases): {', '.join(skipped)}")
     all_ok = True
     for task in tasks:
         for r in run_selftest(task, insp, args.seed):
