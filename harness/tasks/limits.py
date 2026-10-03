@@ -27,8 +27,8 @@ LIMITS: dict[str, RunLimits] = {
     "d_orders_to_note_to_message": RunLimits(40, 720, 1.40),  # 25, $0.65-0.67, 176-217 s
     "b2_note_to_order": RunLimits(60, 1200, 2.50),  # 35, $1.13, 385 s
     "h2_note_to_order_infeasible": RunLimits(70, 1800, 3.00),  # 51, $1.90-1.91, 560-606 s
-    "biz_b1_hours": RunLimits(35, 900, 1.30),  # 19-21, $0.56-0.64, 289-339 s
-    "biz_b2_rate": RunLimits(35, 900, 1.30),  # 20-23, $0.51-0.64, 263-375 s (VM 319-375 s)
-    "biz_d_invoice": RunLimits(35, 900, 1.30),  # 14-20, $0.48-0.67, 211-311 s
+    "biz_b1_hours": RunLimits(50, 1200, 1.80),  # 19-21, $0.56-0.64, 289-339 s (VM 31 steps)
+    "biz_b2_rate": RunLimits(50, 1200, 1.80),  # 20-23, $0.51-0.64, 263-375 s (VM 319-375 s)
+    "biz_d_invoice": RunLimits(50, 1200, 1.80),  # 14-20, $0.48-0.67, 211-311 s (VM 28 steps)
     "biz_h": RunLimits(25, 720, 0.90),  # 9-14, $0.22-0.40, 151-212 s
 }
