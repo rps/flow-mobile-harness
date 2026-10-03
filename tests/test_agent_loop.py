@@ -422,6 +422,59 @@ def test_system_prompt_rules():
         assert phrase in p
 
 
+def _sensitive_rule() -> tuple[dict[str, str], str]:
+    """The confirmation paragraph split into {category: bullet text} and the
+    flattened prose that follows the bullets."""
+    rule = next((par for par in prompts.SYSTEM_PROMPT.split("\n\n") if "request_confirmation" in par), None)
+    assert rule is not None, "no paragraph mentions request_confirmation"
+    lines = rule.splitlines()
+    bullets = {ln[2:].split(":", 1)[0]: ln for ln in lines if ln.startswith("- ")}
+    prose = " ".join(" ".join(ln for ln in lines if not ln.startswith("- ")).split())
+    return bullets, prose
+
+
+def test_sensitive_action_rule_covers_each_category():
+    """Drafts count as financial; messages are outbound; deletions and
+    settings are destructive. The old wording that let a draft invoice look
+    exempt is gone."""
+    bullets, prose = _sensitive_rule()
+    expected = {
+        "anything financial": ("invoice", "even as a draft"),
+        "anything outbound": ("message",),
+        "anything destructive or hard to undo": ("deleting", "settings"),
+        "anything that commits another person or account.": (),
+    }
+    assert set(bullets) >= set(expected), bullets
+    for category, phrases in expected.items():
+        for phrase in phrases:
+            assert phrase in bullets[category], (category, phrase)
+    exemption = next((s for s in prose.split(". ") if "not sensitive" in s), "")
+    for phrase in ("Reading", "navigating", "private note"):
+        assert phrase in exemption, phrase
+    assert "Only take the step if the answer is approve" in prose
+    assert "do not ask again for the same action" in prose
+    assert "cannot easily be undone" not in prompts.SYSTEM_PROMPT
+
+
+def test_sensitive_action_rule_names_no_task():
+    """The rule is general: no task id or per-task sensitive action appears
+    anywhere in the system prompt or the tool definitions."""
+    from harness.tasks import registry
+
+    tasks = registry.all_tasks()
+    assert any(t.sensitive_actions for t in tasks), "registry has no task with sensitive actions to check"
+    from harness.agent.tools import TOOL_DEFINITIONS
+
+    confirm = next((d for d in TOOL_DEFINITIONS if d["name"] == "request_confirmation"), None)
+    assert confirm is not None and "drafts" in confirm["description"]
+    tool_text = json.dumps(TOOL_DEFINITIONS)
+    for t in tasks:
+        for text in (prompts.SYSTEM_PROMPT, tool_text):
+            assert t.id not in text, t.id
+            for action in t.sensitive_actions:
+                assert action not in text, (t.id, action)
+
+
 def test_error_tool_results_never_carry_images(config):
     from anthropic.types import ToolUseBlock
 

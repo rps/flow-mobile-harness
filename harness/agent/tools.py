@@ -88,9 +88,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "request_confirmation",
         "description": (
-            "Ask the user to approve a step before taking it. Call this before sending a "
-            "message, placing an order, paying, deleting, or anything irreversible. "
-            "summary is a structured description of exactly what is prepared."
+            "Required before any sensitive step as defined in the system prompt: financial "
+            "(including drafts), outbound, destructive or settings changes, or anything "
+            "committing another person or account."
         ),
         "input_schema": {
             "type": "object",

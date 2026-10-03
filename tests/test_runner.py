@@ -5,6 +5,7 @@ import time
 import pytest
 
 import harness.runner as runner
+from harness.agent import prompts
 from harness.agent.loop import AgentSettings
 from harness.contracts import (
     Config,
@@ -205,6 +206,51 @@ def test_goal_is_rendered_from_the_plan_and_sent_to_the_agent(rec):
     run = _run(rec, client=client, seed=3)
     assert "{" not in run.goal
     assert json.dumps(run.goal)[1:-1] in seen[0]
+
+
+CONFIRM_SCRIPT = [
+    ("request_confirmation", {"action": "Save note", "summary": {"title": "Workout notes"}}),
+    ("tap", {"x": 27, "y": 60}),
+    ("finish", {"verdict": "done", "summary": "scripted"}),
+]
+
+
+@pytest.mark.parametrize("script", [None, CONFIRM_SCRIPT], ids=["plain", "confirmation"])
+@pytest.mark.parametrize("policy", ["approve", "reject"])
+def test_agent_requests_ignore_task_sensitive_actions(rec, monkeypatch, script, policy):
+    """Two TaskSpecs that differ only in sensitive_actions produce identical
+    model requests, including after a confirmation turn under approve and
+    reject: the per-task list never reaches the agent."""
+    import dataclasses
+
+    from harness.tasks import registry
+
+    base = registry.get("a_markor_note")
+
+    def requests(actions):
+        monkeypatch.setitem(registry._TASKS, base.id, dataclasses.replace(base, sensitive_actions=actions))
+        client = ScriptedClient(script)
+        seen = []
+        create = client.create
+
+        def spy(**kw):
+            request = {k: v for k, v in kw.items() if k != "timeout"}  # wall-clock budget, varies per run
+            seen.append(json.dumps(request, default=str, sort_keys=True))
+            return create(**kw)
+
+        client.create = spy
+        _run(rec, client=client, seed=3, policy=policy)
+        return seen
+
+    plain = requests([])
+    marked = requests(["zz_wire_transfer_alpha", "zz_purge_account_beta"])
+    assert len(plain) >= 2, "the agent made too few model requests to compare"
+    assert plain == marked
+    assert not any("zz_wire_transfer_alpha" in r or "zz_purge_account_beta" in r for r in marked)
+    if script:
+        # the request after the confirmation turn carries the decision back to the model
+        assert '"toolu_fake_1"' in marked[1]
+        assert (prompts.REJECT_NOTE in marked[1]) is (policy == "reject")
 
 
 # --- errors -----------------------------------------------------------------------
