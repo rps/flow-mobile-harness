@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the Mac-side deploy scripts. Source, do not execute.
-# All access goes through IAP (gcloud ... --tunnel-through-iap); nothing is ever
-# opened to the public internet.
+# Owner access goes through IAP (gcloud ... --tunnel-through-iap). The only
+# public port is tcp:22 for the key-only reviewer account (reviewer/).
 
 LABS_VM="${LABS_VM:-<VM>}"
 LABS_ZONE="${LABS_ZONE:-us-east1-b}"

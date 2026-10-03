@@ -314,3 +314,11 @@ def test_scoreboard_reflects_runs(srv):
     assert flow_a["agent_said_done"] == {"rate": 1.0, "n": 2}
     assert flow_a["false_success"] == {"count": 2, "n": 2}  # fake device changes nothing, model says done
     assert board["ledger_total_usd"] == 0.0
+
+
+def test_policy_default_is_reported_in_config(tmp_path):
+    s = Server(tmp_path, policy_default="approve")
+    try:
+        assert s.json("/api/config")[1]["policy_default"] == "approve"
+    finally:
+        s.stop()

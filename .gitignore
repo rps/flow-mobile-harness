@@ -10,3 +10,4 @@ apks/*.apk
 .DS_Store
 apps-probe/apks/
 sample-app/dist/*.apk
+deploy/private/

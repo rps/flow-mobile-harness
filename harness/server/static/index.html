@@ -417,7 +417,7 @@
             </div>
             <label for="policy">Confirmation</label>
             <select id="policy">
-              <option value="ui">Ask me here (ui)</option>
+              <option value="ui">Ask me here (ui, production recommended)</option>
               <option value="approve">Always approve</option>
               <option value="reject">Always reject</option>
             </select>
@@ -1373,6 +1373,7 @@
         $("model").textContent = "model " + cfg.model;
         $("confirm-timeout").textContent = String(cfg.confirm_timeout_s);
         $("fake").checked = !!cfg.fake_default;
+        if (cfg.policy_default) $("policy").value = cfg.policy_default;
         for (const t of tasks
           .slice()
           .sort((a, b) => a.label.localeCompare(b.label)))

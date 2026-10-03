@@ -520,6 +520,7 @@ def create_app(
     baseline_json: str | Path | None = None,
     confirm_timeout_s: float = 300.0,
     fake_default: bool = False,
+    policy_default: str = "ui",
 ) -> FastAPI:
     if not token:
         raise ValueError("a token is required")
@@ -564,7 +565,7 @@ def create_app(
             "Freeform goals are disabled: the emulator baseline does not report host loopback as "
             "blocked (harness/emulator/baseline.json), so an agent could reach services on this Mac. "
             "Re-provision the baseline or start the server with --allow-unblocked.")
-        return {"freeform_enabled": enabled, "freeform_note": note, "fake_default": fake_default,
+        return {"freeform_enabled": enabled, "freeform_note": note, "fake_default": fake_default, "policy_default": policy_default,
                 "confirm_timeout_s": confirm_timeout_s, "model": config.model,
                 "fake_confirm_note": FAKE_CONFIRM_NOTE, "failure_tags": list(FAILURE_TAGS)}
 

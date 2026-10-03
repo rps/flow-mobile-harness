@@ -1,8 +1,9 @@
 # deploy/ — running the harness on the GCE VM
 
 Phase 2 Area F. Scripts and runbook to host the harness on `<VM>` (x86_64, KVM,
-Ubuntu 22.04) behind IAP. Fake mode by default; since 2026-10-03 the VM also holds the API key and has
-run one real scored task (see "API key"). Nothing here touches a Mac emulator.
+Ubuntu 22.04) behind IAP for the owner and a tunnel-only ssh account for outside reviewers
+(`REVIEWER.md`). Real runs by default with confirmations auto-approved; the VM holds the API key
+(see "API key"). Nothing here touches a Mac emulator.
 
 ## What ships
 
@@ -11,7 +12,10 @@ run one real scored task (see "API key"). Nothing here touches a Mac emulator.
 | `lib/gcloud.sh` | Mac | IAP ssh/scp helpers with retry on ssh exit 255 only; start/stop/status |
 | `push_source.sh [REF]` | Mac | `git bundle create` of a branch/tag/commit, scp over IAP, checkout into `~/labs` as branch `deploy`; preserves the VM's provisioned baseline.json/stock_apps.txt. Never rsyncs; .env/.venv/apks/runs cannot leak. |
 | `bootstrap_vm.sh` | VM | Idempotent: Python 3.12 (deadsnakes PPA), Android cmdline-tools/platform-tools/emulator + `system-images;android-36.1;google_apis;x86_64` under `~/android-sdk`, `.venv` from pyproject, pinned Markor APK with SHA-256 check, `~/labs-env.sh` |
-| `serve.sh start|stop|status|token` | VM | `harness.server` on 127.0.0.1:8765, `--fake-default`, stable token in `~/.config/labs/ui_token`; sources `~/labs-env.sh` and requires ANDROID_HOME + LABS_AVD_NAME/PORT/SYSTEM_IMAGE |
+| `serve.sh start|stop|status|token|run|install-service` | VM | `harness.server` on 127.0.0.1:8765, `--policy-default approve`, stable token in `~/.config/labs/ui_token`; sources `~/labs-env.sh` and `~/.config/labs/env`, requires ANDROID_HOME + LABS_AVD_NAME/PORT/SYSTEM_IMAGE; `install-service` makes it a boot-time systemd user service |
+| `reviewer/setup_reviewer.sh` | VM | key-only `reviewer` user that sshd allows to forward 127.0.0.1:8765 and nothing else |
+| `reviewer/make_handoff.sh` | Mac | key, VM account, UI service, autostop off, filled `private/REVIEWER.md` (gitignored) |
+| `REVIEWER.md` | | template of the reviewer's guide: plain `ssh -N -L` tunnel, no gcloud or Google account |
 | `check_emulator.sh` | VM | Throwaway AVD `cloud_check` on 5586: headless boot, adb root, iptables REJECT of 10.0.2.2, loopback probe, snapshot save/load timing; deletes the AVD |
 | `autostop/` | VM | systemd timer running `shutdown -h now` after IDLE_MINUTES without ssh connections or runs-dir writes; `install.sh` |
 | `RUNBOOK.md` | | start, push, bootstrap, test, serve, tunnel, harness baseline AVD (§6b), emulator check, auto-stop, stop, real runs with the key (§10), business profile on the VM (§11) |
@@ -33,15 +37,13 @@ harness needs, 5.4 GB already on disk). The VM has no service account, so auto-s
 
 ## Multiple testers
 
-Today: one shared UI token (printed by `serve.sh token`), one queue (the server runs jobs serially),
-one tunnel per tester (`-L 8765:127.0.0.1:8765`). Anyone with project IAP + OS Login access can open a
-tunnel; there is no per-user identity in the UI. Two options need owner approval because each costs
-money and adds a public surface:
-
-- IAP-protected HTTPS load balancer in front of 8765: no tunnels, Google-identity login, ~$18/month
-  for the forwarding rule plus traffic (**unverified** estimate, check the pricing page).
-- Caddy on the VM with a public 443 and basic auth or OAuth: cheapest, but opens a port to the world,
-  which the owner has ruled out so far.
+Today: one shared UI token, one queue (the server runs jobs serially), one tunnel per tester
+(`-L 8765:127.0.0.1:8765`). Owners tunnel through IAP; outside reviewers use the `reviewer` ssh
+key (RUNBOOK §6a), which needs tcp:22 open to the internet (key-only) and a static IP. There is no
+per-user identity in the UI. Rejected alternatives: an IAP HTTPS load balancer (~$18/month
+**unverified**, and testers would need Google identities) and Caddy with basic auth on a public 443
+(a web port to the world rather than sshd). During a review window the VM stays RUNNING with the
+auto-stop disabled, since a reviewer cannot start it.
 
 The emulator is also single-tenant: one AVD, one baseline snapshot, one run at a time. A second
 tester's run waits in the queue.
