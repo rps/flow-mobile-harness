@@ -248,6 +248,24 @@ def tool_mix(runs: list[RunRecord], steps: Steps) -> str:
     return "\n".join(lines)
 
 
+def settle_table(runs: list[RunRecord], steps: Steps) -> str:
+    """Per run: how the post-action settle wait ended (step meta `settle`) and
+    its total time. Runs recorded before the settle fix show only "-"."""
+    lines = ["| run id | task | settled steps | stable | focus_only | cap | other | total settle s | max settle s |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for r in sorted(runs, key=lambda r: r.run_id):
+        metas = [s.meta for s in steps.get(r.run_id, []) if "settle_s" in (s.meta or {})]
+        if not metas:
+            lines.append(f"| {r.run_id} | {r.task_id} | - | - | - | - | - | - | - |")
+            continue
+        c = Counter(m.get("settle", "none") for m in metas)
+        other = sum(n for k, n in c.items() if k not in ("stable", "focus_only", "cap"))
+        times = [float(m["settle_s"]) for m in metas]
+        lines.append(f"| {r.run_id} | {r.task_id} | {len(metas)} | {c['stable']} | {c['focus_only']} | {c['cap']} | "
+                     f"{other} | {sum(times):.1f} | {max(times):.1f} |")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--runs-dir", default="runs")
@@ -268,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Headline vs non-headline oracle", headline_split(runs)),
         ("Gate accuracy", gate_accuracy(runs, steps)),
         ("Tool mix (steps per tool)", tool_mix(runs, steps)),
+        ("Settle after actions", settle_table(runs, steps)),
     ):
         print(f"### {title}\n\n{body}\n")
     return 0
