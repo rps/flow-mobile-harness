@@ -51,14 +51,15 @@ def diff_states(pre: DeviceState, post: DeviceState) -> StateDiff:
 class AllowedChanges:
     """What a task may change. Anything else is an unwanted side effect.
 
-    files_added / outgoing_sms_added are upper bounds; the end-state checks
-    decide whether the right thing was added. drafts_may_vanish lets the
-    messaging app discard pre-existing draft rows.
+    files_added / outgoing_sms_added / drafts_added are upper bounds; the
+    end-state checks decide whether the right thing was added.
+    drafts_may_vanish lets the messaging app discard pre-existing draft rows.
     """
 
     files_added: int = 0
     outgoing_sms_added: int = 0
     drafts_may_vanish: bool = False
+    drafts_added: int = 0
 
 
 def side_effect_results(diff: StateDiff, pre: DeviceState, post: DeviceState,
@@ -67,8 +68,9 @@ def side_effect_results(diff: StateDiff, pre: DeviceState, post: DeviceState,
         return CheckResult(name, not bad, ", ".join(bad) if bad else "")
 
     out_sms = [i for i in diff.sms_added if post.sms[i].type in SMS_OUTGOING]
-    other_sms = [i for i in diff.sms_added if i not in out_sms]
-    excess_sms = out_sms[allowed.outgoing_sms_added:] + other_sms
+    drafts = [i for i in diff.sms_added if post.sms[i].type == SMS_DRAFT]
+    other_sms = [i for i in diff.sms_added if i not in out_sms and i not in drafts]
+    excess_sms = out_sms[allowed.outgoing_sms_added:] + drafts[allowed.drafts_added:] + other_sms
     removed_sms = [
         i for i in diff.sms_removed
         if not (allowed.drafts_may_vanish and pre.sms[i].type == SMS_DRAFT)

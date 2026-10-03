@@ -12,7 +12,9 @@ HINT_WORDS = ["verif", "check", "provider", "database", "/sdcard", "file", "adb"
 
 def test_registry_lists_and_gets_tasks():
     ids = [t.id for t in all_tasks()]
-    assert ids == ["a_markor_note", "b_contact_to_note", "f_send_sms",
+    assert ids == ["a_markor_note", "b_contact_to_note", "f_send_sms", "d_orders_to_note_to_message",
+                   "f2_place_order", "c_variant_b", "e_provider_full", "e_provider_fallback",
+                   "drift_provider_vs_ui", "h_cancel_order",
                    "biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h"]
     assert get("f_send_sms").flow_type == FlowType.F
     with pytest.raises(KeyError):

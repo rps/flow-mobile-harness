@@ -8,6 +8,10 @@ from pathlib import Path
 import harness.runner as runner
 from harness import cli
 from harness.contracts import Config
+
+ALL_TASK_IDS = ["a_markor_note", "b_contact_to_note", "f_send_sms", "d_orders_to_note_to_message", "f2_place_order",
+                "c_variant_b", "e_provider_full", "e_provider_fallback", "drift_provider_vs_ui", "h_cancel_order",
+                "biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h"]
 from harness.trace.store import TraceStore
 
 REPO = Path(__file__).resolve().parents[1]
@@ -43,10 +47,9 @@ def test_all_runs_every_task(tmp_path):
     code, out, store = _main(tmp_path, "run", "--all", "--fake", "--confirm", "approve", "--seed", "5")
     runs = [store.load_run(r)[0] for r in store.list_runs()]
     tasks = {r.task_id for r in runs}
-    assert [r.meta["steps"] for r in runs] == [5] * 7  # one per registered task; each run gets a fresh scripted model
-    assert code == 0 and tasks == {"a_markor_note", "b_contact_to_note", "f_send_sms",
-                                   "biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h"}
-    assert "7 runs" in out
+    assert [r.meta["steps"] for r in runs] == [5] * len(ALL_TASK_IDS)  # one per registered task; fresh scripted model each
+    assert code == 0 and tasks == set(ALL_TASK_IDS)
+    assert f"{len(ALL_TASK_IDS)} runs" in out
 
 
 def test_freeform_refused_then_allowed(tmp_path, monkeypatch):
@@ -67,8 +70,7 @@ def test_unknown_task_and_bad_repeat_are_usage_errors(tmp_path):
 def test_tasks_lists_registry(tmp_path):
     code, out, _ = _main(tmp_path, "tasks")
     assert code == 0
-    assert [line.split()[0] for line in out.splitlines()] == ["a_markor_note", "b_contact_to_note", "f_send_sms",
-                                                              "biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h"]
+    assert [line.split()[0] for line in out.splitlines()] == ALL_TASK_IDS
 
 
 def test_replay_and_ledger(tmp_path):

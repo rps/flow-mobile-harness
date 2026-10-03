@@ -13,5 +13,14 @@
     "sha256": "e88cdcced7aa3dca25e6b9c7a9bdcfad3e3988ee545be951f42bf9441b5e46bf",
     "notebook_dir": "/storage/emulated/0/Documents/markor"
   },
-  "stock_package_count": 253
+  "stock_package_count": 253,
+  "sample_app": {
+    "package": "com.labs.snackorders",
+    "apk": "sample-app/dist/snackorders-debug.apk",
+    "sha256": "a561dd535b766b6b60e32cbb4a5aba358cf0719ba38113e5ea3cd8268ff144d8",
+    "version_name": "1.0",
+    "installed_at": "2026-10-03T02:17:02+00:00",
+    "provider": "content://com.labs.snackorders.provider/orders",
+    "package_count_after_install": 255
+  }
 }

@@ -11,26 +11,18 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from harness.contracts import RunRecord, StepRecord, TaskSpec, Verdict, VerifierResult
 from harness.device.inspect import SMS_SENT, DeviceState
 from harness.seed.generator import SeedPlan, apply, generate_plan, make_seed
-from harness.verify.process import CONFIRM_TOOL
 from harness.verify.runner import run_verifier
+from harness.verify.sample_app_cases import CASES as _SAMPLE_CASES
+from harness.verify.selftest_cases import Case, Inject, confirm_step, host_ms as _host_ms, iso as _iso
+from harness.verify.selftest_cases import untouched as _untouched
 
-Inject = Callable[[Any, SeedPlan], list[StepRecord]]
-
-
-@dataclass(frozen=True)
-class Case:
-    name: str
-    expect_pass: bool
-    inject: Inject
+__all__ = ["Case", "CaseResult", "CASES", "confirm_step", "run_case", "run_selftest", "cleanup", "format_result", "main"]
 
 
 @dataclass
@@ -45,29 +37,8 @@ class CaseResult:
         return self.result.passed == self.expect_pass
 
 
-def _host_ms() -> int:
-    return time.time_ns() // 1_000_000
-
-
-def _iso(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, UTC).isoformat().replace("+00:00", "Z")
-
-
-def confirm_step(index: int, decided_ms: int, summary: dict, decision: str = "approve",
-                 action: str = "send_sms") -> StepRecord:
-    return StepRecord(
-        index=index, started_at=_iso(decided_ms - 1500), ended_at=_iso(decided_ms),
-        tool_name=CONFIRM_TOOL, tool_input={"action": action, "summary": summary},
-        tool_result={"decision": decision},
-    )
-
-
 def _note_path(insp: Any, name: str) -> str:
     return f"{insp.markor_dir.rstrip('/')}/{name}"
-
-
-def _untouched(insp: Any, plan: SeedPlan) -> list[StepRecord]:
-    return []
 
 
 # --- Task a ------------------------------------------------------------------
@@ -199,6 +170,7 @@ CASES: dict[str, list[Case]] = {
              _f_case(summary_message="Running late, start without me")),
     ],
 }
+CASES.update(_SAMPLE_CASES)
 
 
 def cleanup(insp: Any, baseline: DeviceState) -> None:
