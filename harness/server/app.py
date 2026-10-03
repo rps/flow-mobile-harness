@@ -15,17 +15,20 @@ Fake runs of flow-F tasks and freeform goals use a scripted model with one
 request_confirmation step inserted by the server (not chosen by an agent),
 so the approve/reject gate can be exercised without an emulator or API.
 
-Cancel: every run is started with meta["job_id"], and a cancel first offers
-the job id to `harness.runner.request_cancel` when that hook exists; if it
-takes the cancel, the runner ends the run (termination ERROR, meta
-"cancelled") and restores baseline itself (meta "restored_after_cancel").
-Otherwise the job's device is wrapped so that the next device call raises
-JobCancelled (a pending `ui` confirmation resolves to reject first), the
-runner records termination ERROR, finishes the trace and renders the replay,
-and the worker restores `baseline` under the serial's queue lock (skipped if
-another process holds it, because that run restores first anyway). A cancel
-that lands after the last run ended changes nothing; the job reports
-`cancel_requested` so the page can say so.
+Cancel: every run is started with meta["job_id"]. A cancel first offers the
+job id to `harness.runner.request_cancel` when that hook exists (outside the
+job lock; no approval is accepted meanwhile), then in one locked step records
+the answer, marks the job cancelled and resolves a waiting `ui` confirmation
+to reject. If the hook took the cancel, the runner ends the run (termination
+ERROR, meta "cancelled") and restores baseline itself (meta
+"restored_after_cancel"). Otherwise the server's fallback is armed: the job's
+wrapped device raises JobCancelled at its next call, the runner records
+termination ERROR, finishes the trace and renders the replay, and the worker
+restores `baseline` under the serial's queue lock (skipped if another process
+holds it, because that run restores first anyway). A cancel that lands after
+the agent's turn changes nothing about that run (it stands, scored as usual);
+no further repeat starts and the job ends done with `cancel_requested` set so
+the page can say so.
 """
 
 from __future__ import annotations
@@ -84,6 +87,7 @@ FAKE_CONFIRM_NOTE = "scripted fake step inserted by the server, not chosen by an
 TERMINAL = ("done", "error", "cancelled")
 RESTORE_LOCK_TIMEOUT_S = 30.0
 CANCELLED_BY = "web_ui"  # meta["cancelled_by"] when the server's own fallback stopped a run
+CANCEL_DECIDED = ("runner", "fallback")
 
 
 # --- Jobs ------------------------------------------------------------------------
@@ -128,17 +132,21 @@ class Job:
     cond: threading.Condition = dataclasses.field(default_factory=threading.Condition)
     pending: ConfirmationRequest | None = None
     answer: ConfirmationDecision | None = None
+    answer_by: str | None = None  # who set `answer`: ui, cancel or shutdown
     answered: threading.Event = dataclasses.field(default_factory=threading.Event)
     run: RunRecord | None = None
-    cancelled: threading.Event = dataclasses.field(default_factory=threading.Event)
-    runner_cancel: bool = False  # the runner's own hook accepted the cancel for the active run
+    # Cancel state, written under `cond`: None (no cancel), "asked" (hook being
+    # asked), then one of "runner" (the runner's hook stops and restores the
+    # run), "fallback" (the server's device wrapper stops it) or "queued" (the
+    # job never ran).
+    cancel: str | None = None
     restore: str | None = None
 
     def check_cancelled(self) -> None:
-        """Fallback stop: raise once cancelled, unless the runner's hook took
-        the cancel (it then ends the run itself and restores baseline). The
-        run's meta records who cancelled, so nothing has to parse the error."""
-        if self.cancelled.is_set() and not self.runner_cancel:
+        """Fallback stop: raise once the server's fallback is armed (the hook
+        is absent or declined). The run's meta records who cancelled, so
+        nothing has to parse the error."""
+        if self.cancel == "fallback":
             if self.run is not None:
                 self.run.meta["cancelled_by"] = CANCELLED_BY
             raise JobCancelled("cancelled from the web UI")
@@ -153,7 +161,7 @@ class Job:
             "job_id": self.id, "status": self.status, "run_ids": list(self.run_ids), "error": self.error,
             "task_id": self.req.task_id, "goal": self.req.goal, "policy": self.req.policy,
             "fake": self.req.fake, "repeat": self.req.repeat, "restore": self.restore,
-            "cancel_requested": self.cancelled.is_set(),
+            "cancel_requested": self.cancel is not None,
         }
         if self.pending is not None:
             out["pending"] = self.pending.to_dict()
@@ -286,8 +294,10 @@ class JobManager:
     def stop(self) -> None:
         self.closing.set()
         for job in self.jobs.values():
-            if job.pending is not None:
-                self.answer(job, ConfirmationDecision.REJECT)
+            with job.cond:
+                if job.pending is not None and not job.answered.is_set():
+                    job.answer, job.answer_by = ConfirmationDecision.REJECT, "shutdown"
+                    job.answered.set()
         self.queue.put(None)
 
     def freeform_enabled(self) -> bool:
@@ -305,20 +315,19 @@ class JobManager:
         def handler(request: ConfirmationRequest) -> ConfirmationDecision:
             with job.cond:
                 job.answered.clear()
-                job.answer = None
+                job.answer = job.answer_by = None
                 job.pending = request
                 job.status = "waiting_confirmation"
-                if job.cancelled.is_set():  # cancelled between the last check and now
-                    job.answer = ConfirmationDecision.REJECT
+                if job.cancel in CANCEL_DECIDED:  # decided between the last check and now
+                    job.answer, job.answer_by = ConfirmationDecision.REJECT, "cancel"
                     job.answered.set()
             job.emit("confirmation", {"run_id": job.run.run_id if job.run else None, **request.to_dict()})
             got = job.answered.wait(self.confirm_timeout_s)
             with job.cond:
                 decision = job.answer if got and job.answer is not None else ConfirmationDecision.REJECT
-                cancelled = job.cancelled.is_set() and decision is ConfirmationDecision.REJECT
+                source = (job.answer_by or "ui") if got else "timeout"
                 job.pending = None
                 job.status = "running"
-            source = "cancel" if cancelled else "ui" if got else "timeout"
             if job.run is not None:
                 job.run.meta.setdefault("ui_confirmations", []).append(
                     {"action": request.action, "decision": decision.value, "by": source})
@@ -337,31 +346,36 @@ class JobManager:
         with job.cond:
             if job.status in TERMINAL:
                 return False
-            if job.pending is not None:  # a waiting confirmation resolves to reject, even if answered
-                job.answer = ConfirmationDecision.REJECT
-                job.answered.set()
-            if job.cancelled.is_set():  # already stopping
+            if job.cancel is not None:  # already stopping
                 return True
-            job.cancelled.set()  # before the hook: no further repeat can start from here on
+            job.cancel = "asked"  # from here on answer() refuses approvals and no repeat starts
             running = job.status != "queued"
-            if not running:
-                job.status = "cancelled"
-        if not running:
-            job.emit("job_done", job.summary())
-            return True
-        # The runner's hook is called without job.cond held: it may block, and
-        # the worker needs the lock to emit events. Until it answers, the
-        # device wrapper may already have stopped the run; that is fine.
-        job.runner_cancel = _request_runner_cancel(job)
+        # The runner's hook is asked before any other state changes and without
+        # job.cond held (it may block; the worker needs the lock to emit). Then
+        # one locked step records its answer, decides the cancel and rejects a
+        # waiting confirmation, so the woken worker knows which path stops it.
+        took_it = running and _request_runner_cancel(job)
+        with job.cond:
+            job.cancel = "runner" if took_it else "fallback" if running else "queued"
+            if job.pending is not None:  # resolves to reject, even if already answered
+                job.answer, job.answer_by = ConfirmationDecision.REJECT, "cancel"
+                job.answered.set()
+            if running:
+                return True
+            job.status = "cancelled"
+        job.emit("job_done", job.summary())
         return True
 
-    def answer(self, job: Job, decision: ConfirmationDecision) -> bool:
+    def answer(self, job: Job, decision: ConfirmationDecision) -> str | None:
+        """Record the page's decision; returns the reason when it is refused."""
         with job.cond:
             if job.pending is None or job.answered.is_set():
-                return False
-            job.answer = decision
+                return "no confirmation is pending for this job"
+            if job.cancel is not None:
+                return "the job is being cancelled"
+            job.answer, job.answer_by = decision, "ui"
             job.answered.set()
-            return True
+            return None
 
     # --- worker
 
@@ -380,7 +394,7 @@ class JobManager:
             if job is None or self.closing.is_set():
                 return
             with job.cond:
-                if job.cancelled.is_set():  # cancelled while queued; cancel() reported it
+                if job.cancel is not None:  # cancelled while queued; cancel() reports it
                     continue
                 job.status = "running"
             try:
@@ -406,7 +420,7 @@ class JobManager:
         for _ in range(req.repeat):
             if self.closing.is_set():
                 break
-            if job.cancelled.is_set():
+            if job.cancel is not None:
                 return True
             client = ScriptedClient(script) if script is not None else env.model_client_factory()
             run = run_task(
@@ -427,12 +441,9 @@ class JobManager:
                 job.restore = self._restore(env)
                 job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "server"})
                 return True
-            if job.cancelled.is_set():  # cancel accepted, but nothing stopped the run: restore anyway
-                note = ("runner hook accepted the cancel but the run ended without it" if job.runner_cancel
-                        else "the run ended before the cancel could stop it")
-                job.restore = self._restore(env)
-                job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "server", "note": note})
-                return True
+            with job.cond:
+                if job.cancel is not None:  # landed after the agent's turn: the run stands, no repeat starts
+                    return False
         return False
 
     @staticmethod
@@ -624,8 +635,9 @@ def create_app(
     @app.post("/api/jobs/{job_id}/confirmation")
     def answer(job_id: str, body: Answer) -> dict[str, Any]:
         job = _job(job_id)
-        if not jobs.answer(job, body.decision):
-            raise HTTPException(409, "no confirmation is pending for this job")
+        refused = jobs.answer(job, body.decision)
+        if refused:
+            raise HTTPException(409, refused)
         return {"job_id": job.id, "decision": body.decision.value}
 
     @app.get("/api/runs")
