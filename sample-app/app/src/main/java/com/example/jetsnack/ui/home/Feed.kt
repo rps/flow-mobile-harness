@@ -64,6 +64,7 @@ import com.example.jetsnack.ui.components.SnackImage
 import com.example.jetsnack.ui.theme.JetsnackTheme
 import com.example.jetsnack.ui.utils.formatPrice
 import com.example.jetsnack.ui.utils.isVariantB
+import com.example.jetsnack.ui.utils.productInfoLine
 
 @Composable
 fun Feed(onSnackClick: (Long, String) -> Unit, modifier: Modifier = Modifier) {
@@ -183,14 +184,24 @@ private fun SnackCollectionRows(snackCollection: SnackCollection, onSnackClick: 
                     contentDescription = null,
                     modifier = Modifier.size(56.dp),
                 )
-                Text(
-                    text = snack.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = JetsnackTheme.colors.textSecondary,
+                Column(
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 16.dp),
-                )
+                ) {
+                    Text(
+                        text = snack.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = JetsnackTheme.colors.textSecondary,
+                    )
+                    productInfoLine(snack)?.let { info ->
+                        Text(
+                            text = info,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = JetsnackTheme.colors.textHelp,
+                        )
+                    }
+                }
                 Text(
                     text = formatPrice(snack.price),
                     style = MaterialTheme.typography.bodyLarge,

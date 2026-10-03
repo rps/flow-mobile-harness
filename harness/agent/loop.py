@@ -494,7 +494,8 @@ def run_agent(
     clock: Callable[[], float] = time.monotonic,
 ) -> AgentOutcome:
     """Drive `device` toward `goal`. Each call is a fresh conversation."""
-    settings = settings or AgentSettings()
+    # Without explicit settings the per-run cap follows Config (HARNESS_RUN_CAP_USD, default 1.50).
+    settings = settings or AgentSettings(per_run_cap_usd=config.run_cap_usd)
     if model_client is None:
         model_client = anthropic.Anthropic(api_key=config.require_api_key(), max_retries=settings.api_retries)
     return _Run(goal, device, config, confirm, on_step, model_client, settings, clock).run()

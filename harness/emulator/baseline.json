@@ -17,10 +17,11 @@
   "sample_app": {
     "package": "com.labs.snackorders",
     "apk": "sample-app/dist/snackorders-debug.apk",
-    "sha256": "a561dd535b766b6b60e32cbb4a5aba358cf0719ba38113e5ea3cd8268ff144d8",
+    "sha256": "f5b4bb5243a651a89ea0e7b1d3ad7647089b49b24b5d24d34de2c601bba418ae",
     "version_name": "1.0",
-    "installed_at": "2026-10-03T02:17:02+00:00",
+    "installed_at": "2026-10-03T06:53:52+00:00",
     "provider": "content://com.labs.snackorders.provider/orders",
-    "package_count_after_install": 255
+    "package_count_after_install": 255,
+    "replaces_sha256": "a561dd535b766b6b60e32cbb4a5aba358cf0719ba38113e5ea3cd8268ff144d8"
   }
 }

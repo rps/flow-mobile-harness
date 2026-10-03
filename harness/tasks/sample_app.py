@@ -10,6 +10,7 @@ from harness.tasks import (
     sample_e_provider,
     sample_f2_place_order,
     sample_h_cancel_order,
+    sample_note_to_order,
 )
 
 TASKS: list[TaskSpec] = [
@@ -20,4 +21,6 @@ TASKS: list[TaskSpec] = [
     sample_e_provider.TASK_FALLBACK,
     sample_drift_provider_vs_ui.TASK,
     sample_h_cancel_order.TASK,
+    sample_note_to_order.TASK,
+    sample_note_to_order.TASK_INFEASIBLE,
 ]

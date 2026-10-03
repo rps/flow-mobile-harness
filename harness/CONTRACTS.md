@@ -55,6 +55,6 @@ Records with `to_dict()` / `from_dict()` survive a JSON round trip; enums serial
 - `ConfigError(Exception)`
 - `load_env_file(path) -> dict[str, str]`: parses KEY=VALUE lines and skips comments. Handles an `export` prefix and quotes. A missing file returns {}. Never modifies `os.environ`.
 - `Config(model="claude-opus-5-5", max_steps=40, wall_clock_s=600.0, budget_usd=2.0, screenshot_max_px=1280, runs_dir="runs", api_key=None)`. `api_key` is excluded from repr.
-  - `Config.from_env(env_file=".env", environ=None) -> Config`: precedence is defaults < env_file < environ (`os.environ` when None). Variables: `HARNESS_MODEL`, `HARNESS_MAX_STEPS`, `HARNESS_WALL_CLOCK_S`, `HARNESS_BUDGET_USD`, `HARNESS_SCREENSHOT_MAX_PX`, `HARNESS_RUNS_DIR`, `ANTHROPIC_API_KEY`. Raises `ConfigError` on non-numeric or non-positive values.
+  - `Config.from_env(env_file=".env", environ=None) -> Config`: precedence is defaults < env_file < environ (`os.environ` when None). Variables: `HARNESS_MODEL`, `HARNESS_MAX_STEPS`, `HARNESS_WALL_CLOCK_S`, `HARNESS_BUDGET_USD`, `HARNESS_SCREENSHOT_MAX_PX`, `HARNESS_RUNS_DIR`, `HARNESS_RUN_CAP_USD` (per-run model spend cap, default 1.50; used by `run_agent` when no explicit `AgentSettings` is passed), `ANTHROPIC_API_KEY`. Raises `ConfigError` on non-numeric, non-positive or non-finite values.
   - `.require_api_key() -> str`: raises `ConfigError` if unset
   - `.to_dict() -> dict`: never includes the key

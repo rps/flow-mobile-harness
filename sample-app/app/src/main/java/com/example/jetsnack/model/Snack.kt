@@ -30,6 +30,10 @@ data class Snack(
     val price: Long,
     val tagline: String = "",
     val tags: Set<String> = emptySet(),
+    /** Servings in one unit; null when the catalogue does not say. */
+    val servingSize: Int? = null,
+    /** Days from ordering to delivery; null when the catalogue does not say. */
+    val deliveryDays: Int? = null,
 )
 
 /**

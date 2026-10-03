@@ -19,10 +19,11 @@ BY_ID = {t.id: t for t in TASKS}
 def test_task_ids_flows_and_tiers():
     assert [t.id for t in TASKS] == [
         "d_orders_to_note_to_message", "f2_place_order", "c_variant_b", "e_provider_full",
-        "e_provider_fallback", "drift_provider_vs_ui", "h_cancel_order",
+        "e_provider_fallback", "drift_provider_vs_ui", "h_cancel_order", "b2_note_to_order",
+        "h2_note_to_order_infeasible",
     ]
     assert [t.flow_type for t in TASKS] == [
-        FlowType.D, FlowType.F, FlowType.C, FlowType.E, FlowType.E, FlowType.DRIFT, FlowType.H,
+        FlowType.D, FlowType.F, FlowType.C, FlowType.E, FlowType.E, FlowType.DRIFT, FlowType.H, FlowType.B, FlowType.H,
     ]
     assert all(t.oracle_tier == OracleTier.OWN_STORAGE for t in TASKS)
     assert BY_ID["f2_place_order"].sensitive_actions == SENSITIVE_ACTIONS and SENSITIVE_ACTIONS[0] == "place_order"

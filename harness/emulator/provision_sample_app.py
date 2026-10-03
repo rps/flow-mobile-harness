@@ -1,12 +1,15 @@
 """Add the sample app (com.labs.snackorders) to the harness emulator's baseline.
 
-    python -m harness.emulator.provision_sample_app [--windowed] [--apk PATH]
+    python -m harness.emulator.provision_sample_app [--windowed] [--apk PATH] [--baseline-json PATH] [--upgrade]
 
 Sequence: boot if needed, restore `baseline`, install the APK, confirm the
 package and its orders provider answer, force-stop it, save `baseline`
 again (the one sanctioned re-baseline), and record the APK's SHA-256 under
 the "sample_app" key of baseline.json. The recording helper only adds keys:
 an existing key with a different value is an error, never overwritten.
+The one exception is --upgrade: it installs a different APK over the
+recorded one and then replaces the "sample_app" entry (keeping the old hash
+under "replaces_sha256"); nothing else in the file changes.
 
 Uses the emulator manager's AVD, port and serial, so it follows whatever
 the manager resolves (including its environment overrides).
@@ -54,6 +57,18 @@ def add_baseline_keys(path: str | Path, new_keys: dict[str, Any]) -> dict[str, A
     return data
 
 
+def replace_baseline_key(path: str | Path, key: str, value: Any) -> dict[str, Any]:
+    """Set one key of the baseline JSON object, overwriting it. Only the
+    explicit --upgrade path uses this; returns the resulting object."""
+    p = Path(path)
+    data = json.loads(p.read_text()) if p.is_file() else {}
+    if not isinstance(data, dict):
+        raise BaselineKeyConflict(f"{p} does not hold a JSON object")
+    data[key] = value
+    p.write_text(json.dumps(data, indent=2) + "\n")
+    return data
+
+
 def sha256_of(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -94,17 +109,21 @@ def recorded_sample_app(path: str | Path) -> dict[str, Any] | None:
     return data.get(BASELINE_KEY) if isinstance(data, dict) else None
 
 
-def provision(apk: str | Path = DEFAULT_APK, windowed: bool = True, baseline_json: str | Path | None = None) -> dict:
+def provision(apk: str | Path = DEFAULT_APK, windowed: bool = True, baseline_json: str | Path | None = None,
+              upgrade: bool = False) -> dict:
     """Idempotent for the same APK: a repeat re-installs and re-saves the
     snapshot but keeps the existing record. A different APK than the one
-    recorded is refused before the emulator is touched."""
+    recorded is refused before the emulator is touched, unless `upgrade`:
+    then it is installed over the old one (install -r keeps the app's data;
+    the app migrates its database) and the record is replaced."""
     apk = Path(apk)
     if not apk.is_file():
         raise DeviceError(f"APK not found: {apk} (build it per sample-app/BUILD.md)")
     digest = sha256_of(apk)
     baseline_path = Path(manager.BASELINE_JSON if baseline_json is None else baseline_json)
     existing = recorded_sample_app(baseline_path)
-    if existing is not None and existing.get("sha256") != digest:
+    upgrading = existing is not None and existing.get("sha256") != digest
+    if upgrading and not upgrade:
         raise BaselineKeyConflict(
             f"{baseline_path}: {BASELINE_KEY} already records sha256 {existing.get('sha256')}, not {digest}")
     boot_s = None
@@ -122,7 +141,7 @@ def provision(apk: str | Path = DEFAULT_APK, windowed: bool = True, baseline_jso
     _shell("input", "keyevent", "KEYCODE_HOME")
     time.sleep(1)
     manager.save_snapshot(manager.BASELINE)
-    info = existing or {
+    info = existing if existing is not None and not upgrading else {
         "package": PACKAGE,
         "apk": str(apk.relative_to(manager.REPO)) if apk.is_relative_to(manager.REPO) else str(apk),
         "sha256": digest,
@@ -132,7 +151,11 @@ def provision(apk: str | Path = DEFAULT_APK, windowed: bool = True, baseline_jso
         # stock_package_count above is the pre-install inventory; this is the count now.
         "package_count_after_install": len(packages),
     }
-    add_baseline_keys(baseline_path, {BASELINE_KEY: info})
+    if upgrading:
+        info["replaces_sha256"] = existing.get("sha256")
+        replace_baseline_key(baseline_path, BASELINE_KEY, info)
+    else:
+        add_baseline_keys(baseline_path, {BASELINE_KEY: info})
     return {**info, "serial": manager.SERIAL, "avd": manager.AVD_NAME, "boot_s": boot_s, "restore_s": round(restore_s, 2)}
 
 
@@ -141,9 +164,12 @@ def main(argv: list[str] | None = None) -> int:
                                  description=__doc__.splitlines()[0])
     ap.add_argument("--apk", default=str(DEFAULT_APK))
     ap.add_argument("--windowed", action="store_true", help="boot with a window if the emulator is not running")
+    ap.add_argument("--baseline-json", help=f"record file to update (default {manager.BASELINE_JSON})")
+    ap.add_argument("--upgrade", action="store_true",
+                    help="install over a different recorded APK and replace its sample_app record")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    print(json.dumps(provision(a.apk, windowed=a.windowed), indent=2))
+    print(json.dumps(provision(a.apk, windowed=a.windowed, baseline_json=a.baseline_json, upgrade=a.upgrade), indent=2))
     return 0
 
 

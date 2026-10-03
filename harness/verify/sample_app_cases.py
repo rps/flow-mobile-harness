@@ -14,6 +14,8 @@ from harness.seed.generator import SeedPlan
 from harness.seed.sample_app import insert_order, seed_of
 from harness.verify.sample_app import PLACED, money
 from harness.verify.selftest_cases import Case, Inject, confirm_step, finish_step, host_ms, untouched
+from harness.verify.snack_request_cases import CASES as SNACK_REQUEST_CASES
+from harness.verify.snack_request_cases import GOLD_VARIANTS as SNACK_REQUEST_GOLD_VARIANTS
 
 def _note(insp: Any, title: str, body: str) -> None:
     insp.push_file(f"{insp.markor_dir.rstrip('/')}/{title}.md", f"# {title}\n\n{body}\n".encode())
@@ -374,3 +376,6 @@ GOLD_VARIANTS: dict[str, list[Case]] = {
     "c_variant_b": [REJECTED_THEN_APPROVED],
     "drift_provider_vs_ui": [Case("gold_inline_bold", True, _drift_note("MISMATCH", "missing_id", inline=True))],
 }
+
+CASES.update(SNACK_REQUEST_CASES)
+GOLD_VARIANTS.update(SNACK_REQUEST_GOLD_VARIANTS)

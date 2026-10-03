@@ -209,6 +209,19 @@ def main():
           dict(conn.execute("SELECT key, value FROM settings")).get("variant") == "A")
     root = ui_dump()
     check("home screen shows seeded product", find_node(root, text="Cupcake") is not None, str(ui_texts(root))[:200])
+    facts = conn.execute("SELECT id, tags, serving_size, delivery_days FROM products WHERE id IN (1, 2, 7) ORDER BY id").fetchall()
+    check("catalogue facts stored as seeded", facts == [(1, "nut-free,vegan", 4, 1), (2, "", None, None), (7, "contains-nuts", 6, 3)],
+          str(facts))
+    check("home card shows dietary labels", find_node(root, text="Nut-free · Vegan") is not None, str(ui_texts(root))[:300])
+    tap(text="Cupcake")
+    wait_for_text("Serves 4", contains=False)
+    root = ui_dump()
+    check("detail shows dietary labels, pack size and delivery time",
+          all(find_node(root, text=t) is not None for t in ("Nut-free · Vegan", "Serves 4", "Delivery in 1 day")), str(ui_texts(root))[:300])
+    check("detail hides the sample ingredient list for products with catalogue facts",
+          find_node(root, text="Almond Flour", contains=True) is None)
+    shell("input keyevent BACK")
+    time.sleep(1.5)
     tap_tab(3)
     wait_for_text("Order #1002", contains=False)
     root = ui_dump()
@@ -263,6 +276,8 @@ def main():
     root = ui_dump()
     check("variant B: list layout shows collection heading and prices", find_node(root, text="Bakery") is not None and find_node(root, text="$4.99") is not None,
           str(ui_texts(root))[:300])
+    check("variant B: list row shows catalogue facts in B wording",
+          find_node(root, text="Nut-free · Vegan · 4 servings · Arrives in 1 day") is not None, str(ui_texts(root))[:300])
     ok_checkout, ok_place, done = place_order_via_ui("Continue", "Submit order", "Thanks! We")
     check("variant B: Continue → Submit order → confirmation", ok_checkout and ok_place and done)
     conn = pull_db()
@@ -307,6 +322,13 @@ def main():
     conn = pull_db()
     check("malformed seed rejected and renamed, DB untouched",
           "seed.rejected.json" in files and "seed.json" not in files and conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == before, str(files))
+    shell(f"run-as {PKG} rm files/seed.rejected.json", check=False)
+    bad = base_seed()
+    bad["products"][0]["tags"] = ["Nut Free"]
+    push_seed(bad)
+    start_app()
+    files = seed_file_state()
+    check("seed with a malformed tag rejected", "seed.rejected.json" in files and "seed.json" not in files, str(files))
     shell(f"run-as {PKG} rm files/seed.rejected.json", check=False)
 
     # --- no cancellation anywhere

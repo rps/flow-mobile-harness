@@ -49,6 +49,9 @@ All fields are optional except where noted. Money is in integer cents, times in 
       "price_cents": 299, // required
       "image": "cupcake", // bundled drawable name, default placeholder
       "collection": "Android's picks", // Home tab section, default "Snacks"
+      "tags": ["nut-free", "vegan"], // dietary tags, lowercase words joined by "-"; default none
+      "serving_size": 4, // servings in one unit, > 0; omit the key for "not stated" (null is rejected)
+      "delivery_days": 1, // days from ordering to delivery, > 0; omit the key for "not stated" (null is rejected)
     },
   ],
   "cart": [

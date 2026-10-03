@@ -53,6 +53,7 @@ import com.example.jetsnack.ui.components.JetsnackSurface
 import com.example.jetsnack.ui.components.SnackImage
 import com.example.jetsnack.ui.theme.JetsnackTheme
 import com.example.jetsnack.ui.utils.formatPrice
+import com.example.jetsnack.ui.utils.productInfoLine
 
 @Composable
 fun SearchResults(searchResults: List<Snack>, onSnackClick: (Long, String) -> Unit) {
@@ -108,6 +109,13 @@ private fun SearchResult(snack: Snack, onSnackClick: (Long, String) -> Unit, sho
                     style = MaterialTheme.typography.bodyLarge,
                     color = JetsnackTheme.colors.textHelp,
                 )
+                productInfoLine(snack)?.let { info ->
+                    Text(
+                        text = info,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = JetsnackTheme.colors.textHelp,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = formatPrice(snack.price),

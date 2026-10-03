@@ -32,6 +32,21 @@ The catalogue shown on the Home and Search tabs.
 | `image`       | TEXT    | Not null. Name of a bundled drawable (see SEED_FORMAT.md); `''` = placeholder. |
 | `collection`  | TEXT    | Not null. Section heading the product appears under on the Home tab.           |
 | `position`    | INTEGER | Not null. Display order within the catalogue.                                  |
+| `tags`        | TEXT    | Not null, default `''`. Comma-separated dietary tags, e.g. `nut-free,vegan`.   |
+| `serving_size`  | INTEGER | Servings in one unit. NULL = not stated (nothing shown).                     |
+| `delivery_days` | INTEGER | Days from ordering to delivery. NULL = not stated (nothing shown).           |
+
+Database version 2 added `tags`, `serving_size` and `delivery_days`; a version-1 database is
+migrated in place with `ALTER TABLE` on first open, so `adb install -r` over an older build keeps
+its data. The built-in catalogue has none of the three.
+
+Where they appear: the product detail screen lists "Dietary", "Pack size" ("Serves 4") and
+"Delivery" ("Delivery in 1 day") above the description, and then leaves out the sample
+ingredient list; search results and variant B's Home rows show one line
+("Nut-free · Vegan · Serves 4 · Delivery in 1 day"; variant B words it "4 servings · Arrives in 1 day");
+the Home tab's highlight cards show the dietary labels only. Known tags get fixed labels
+(`nut-free` Nut-free, `contains-nuts` Contains nuts, `vegan`, `gluten-free`, `dairy-free`);
+others are shown with dashes as spaces. Products are not exposed through the ContentProvider.
 
 ## cart_items
 

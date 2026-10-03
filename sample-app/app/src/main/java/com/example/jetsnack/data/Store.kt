@@ -56,8 +56,9 @@ private const val TAG = "SnackOrders"
 private const val DB_NAME = "snackorders.db"
 const val SEED_FILE = "seed.json"
 const val SEED_REJECTED_FILE = "seed.rejected.json"
+private val TAG_PATTERN = Regex("[a-z0-9]+(-[a-z0-9]+)*")
 
-private class DbHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 1) {
+private class DbHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, 2) {
     init {
         setWriteAheadLoggingEnabled(false)
     }
@@ -77,7 +78,10 @@ private class DbHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, nu
                 price_cents INTEGER NOT NULL,
                 image TEXT NOT NULL DEFAULT '',
                 collection TEXT NOT NULL DEFAULT '',
-                position INTEGER NOT NULL
+                position INTEGER NOT NULL,
+                tags TEXT NOT NULL DEFAULT '',
+                serving_size INTEGER,
+                delivery_days INTEGER
             )""",
         )
         db.execSQL(
@@ -109,7 +113,13 @@ private class DbHelper(context: Context) : SQLiteOpenHelper(context, DB_NAME, nu
         db.execSQL("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE products ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE products ADD COLUMN serving_size INTEGER")
+            db.execSQL("ALTER TABLE products ADD COLUMN delivery_days INTEGER")
+        }
+    }
 }
 
 /**
@@ -218,6 +228,12 @@ object Store {
                 val price = p.getLong("price_cents")
                 require(price >= 0) { "product $id: price_cents must not be negative" }
                 require(id !in prices) { "product $id is listed twice" }
+                val tags = p.optJSONArray("tags")?.let { arr -> (0 until arr.length()).map { arr.getString(it) } }.orEmpty()
+                require(tags.all { TAG_PATTERN.matches(it) }) { "product $id: tags must be lowercase words joined by '-'" }
+                val servingSize = if (p.has("serving_size")) p.getInt("serving_size") else null
+                require(servingSize == null || servingSize > 0) { "product $id: serving_size must be positive" }
+                val deliveryDays = if (p.has("delivery_days")) p.getInt("delivery_days") else null
+                require(deliveryDays == null || deliveryDays > 0) { "product $id: delivery_days must be positive" }
                 db.insertOrThrow(
                     "products",
                     null,
@@ -229,6 +245,9 @@ object Store {
                         put("image", p.optString("image", ""))
                         put("collection", p.optString("collection", ""))
                         put("position", i)
+                        put("tags", tags.joinToString(","))
+                        put("serving_size", servingSize)
+                        put("delivery_days", deliveryDays)
                     },
                 )
                 prices[id] = price
@@ -353,7 +372,11 @@ object Store {
     private fun reload() {
         val grouped = LinkedHashMap<String, MutableList<Snack>>()
         val all = ArrayList<Snack>()
-        db.rawQuery("SELECT id, name, tagline, price_cents, image, collection FROM products ORDER BY position, id", null).use { c ->
+        db.rawQuery(
+            "SELECT id, name, tagline, price_cents, image, collection, tags, serving_size, delivery_days " +
+                "FROM products ORDER BY position, id",
+            null,
+        ).use { c ->
             while (c.moveToNext()) {
                 val image = appContext.resources.getIdentifier(c.getString(4), "drawable", appContext.packageName)
                 val snack = Snack(
@@ -362,6 +385,9 @@ object Store {
                     tagline = c.getString(2),
                     price = c.getLong(3),
                     imageRes = if (image != 0) image else R.drawable.placeholder,
+                    tags = c.getString(6).split(',').filter { it.isNotEmpty() }.toSet(),
+                    servingSize = if (c.isNull(7)) null else c.getInt(7),
+                    deliveryDays = if (c.isNull(8)) null else c.getInt(8),
                 )
                 all += snack
                 grouped.getOrPut(c.getString(5).ifEmpty { "Snacks" }) { ArrayList() } += snack

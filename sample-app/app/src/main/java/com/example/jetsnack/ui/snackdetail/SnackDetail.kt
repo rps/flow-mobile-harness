@@ -115,7 +115,10 @@ import com.example.jetsnack.ui.components.SnackCollection
 import com.example.jetsnack.ui.components.SnackImage
 import com.example.jetsnack.ui.theme.JetsnackTheme
 import com.example.jetsnack.ui.theme.Neutral8
+import com.example.jetsnack.ui.utils.deliveryLabel
+import com.example.jetsnack.ui.utils.dietaryLabel
 import com.example.jetsnack.ui.utils.formatPrice
+import com.example.jetsnack.ui.utils.servingsLabel
 import kotlin.math.max
 import kotlin.math.min
 
@@ -184,7 +187,7 @@ fun SnackDetail(snackId: Long, origin: String, upPress: () -> Unit) {
         ) {
             val scroll = rememberScrollState(0)
             Header(snack.id, origin = origin)
-            Body(related, scroll)
+            Body(snack, related, scroll)
             Title(snack, origin) { scroll.value }
             Image(snackId, origin, snack.imageRes) { scroll.value }
             Up(upPress)
@@ -282,7 +285,7 @@ private fun SharedTransitionScope.Up(upPress: () -> Unit) {
 }
 
 @Composable
-private fun Body(related: List<SnackCollection>, scroll: ScrollState) {
+private fun Body(snack: Snack, related: List<SnackCollection>, scroll: ScrollState) {
     val sharedTransitionScope =
         LocalSharedTransitionScope.current ?: throw IllegalStateException("No scope found")
     with(sharedTransitionScope) {
@@ -306,6 +309,27 @@ private fun Body(related: List<SnackCollection>, scroll: ScrollState) {
                 ) {
                     Column {
                         Spacer(Modifier.height(TitleHeight))
+                        val info = listOfNotNull(
+                            dietaryLabel(snack)?.let { stringResource(R.string.detail_dietary) to it },
+                            servingsLabel(snack)?.let { stringResource(R.string.detail_servings) to it },
+                            deliveryLabel(snack)?.let { stringResource(R.string.detail_delivery) to it },
+                        )
+                        info.forEach { (label, value) ->
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = JetsnackTheme.colors.textHelp,
+                                modifier = HzPadding,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = value,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = JetsnackTheme.colors.textSecondary,
+                                modifier = HzPadding,
+                            )
+                            Spacer(Modifier.height(16.dp))
+                        }
                         Text(
                             text = stringResource(R.string.detail_header),
                             style = MaterialTheme.typography.labelSmall,
@@ -346,20 +370,23 @@ private fun Body(related: List<SnackCollection>, scroll: ScrollState) {
                                 .skipToLookaheadSize(),
                         )
 
-                        Spacer(Modifier.height(40.dp))
-                        Text(
-                            text = stringResource(R.string.ingredients),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = JetsnackTheme.colors.textHelp,
-                            modifier = HzPadding,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = stringResource(R.string.ingredients_list),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = JetsnackTheme.colors.textHelp,
-                            modifier = HzPadding,
-                        )
+                        // The built-in ingredient list is sample text; products with catalogue data show that instead.
+                        if (info.isEmpty()) {
+                            Spacer(Modifier.height(40.dp))
+                            Text(
+                                text = stringResource(R.string.ingredients),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = JetsnackTheme.colors.textHelp,
+                                modifier = HzPadding,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = stringResource(R.string.ingredients_list),
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = JetsnackTheme.colors.textHelp,
+                                modifier = HzPadding,
+                            )
+                        }
 
                         Spacer(Modifier.height(16.dp))
                         JetsnackDivider()

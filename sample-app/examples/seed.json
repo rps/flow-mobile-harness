@@ -13,7 +13,10 @@
       "tagline": "Vanilla, iced",
       "price_cents": 299,
       "image": "cupcake",
-      "collection": "Bakery"
+      "collection": "Bakery",
+      "tags": ["nut-free", "vegan"],
+      "serving_size": 4,
+      "delivery_days": 1
     },
     {
       "id": 2,
@@ -61,7 +64,10 @@
       "tagline": "Roasted",
       "price_cents": 599,
       "image": "almonds",
-      "collection": "Savoury"
+      "collection": "Savoury",
+      "tags": ["contains-nuts"],
+      "serving_size": 6,
+      "delivery_days": 3
     },
     {
       "id": 8,

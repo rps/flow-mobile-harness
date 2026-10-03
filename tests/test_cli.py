@@ -11,6 +11,7 @@ from harness.contracts import Config
 
 ALL_TASK_IDS = ["a_markor_note", "b_contact_to_note", "f_send_sms", "d_orders_to_note_to_message", "f2_place_order",
                 "c_variant_b", "e_provider_full", "e_provider_fallback", "drift_provider_vs_ui", "h_cancel_order",
+                "b2_note_to_order", "h2_note_to_order_infeasible",
                 "biz_b1_hours", "biz_b2_rate", "biz_d_invoice", "biz_h"]
 from harness.trace.store import TraceStore
 

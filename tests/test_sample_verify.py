@@ -183,7 +183,7 @@ def test_each_sample_task_has_untouched_gold_and_decoys(task):
 
 @pytest.mark.parametrize("offset_ms", [-90_000, 0, 90_000])
 def test_order_selftests_hold_under_device_clock_skew(offset_ms):
-    for tid in ("f2_place_order", "h_cancel_order"):
+    for tid in ("f2_place_order", "h_cancel_order", "b2_note_to_order"):
         task = BY_ID[tid]
         results = [run_case(task, case, FakeInspector(clock_offset_ms=offset_ms), 5) for case in sc.CASES[tid]]
         assert all(r.ok for r in results), [format_result(r) for r in results if not r.ok]

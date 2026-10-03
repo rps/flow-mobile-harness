@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import sqlite3
 import tempfile
 from collections.abc import Callable
@@ -73,6 +74,21 @@ class SeedProduct:
     price_cents: int
     image: str
     collection: str
+    # Catalogue facts shown in the UI (SCHEMA.md); empty/None = not stated.
+    tags: tuple[str, ...] = ()
+    serving_size: int | None = None
+    delivery_days: int | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        doc: dict[str, Any] = {"id": self.id, "name": self.name, "tagline": self.tagline,
+                               "price_cents": self.price_cents, "image": self.image, "collection": self.collection}
+        if self.tags:
+            doc["tags"] = list(self.tags)
+        if self.serving_size is not None:
+            doc["serving_size"] = self.serving_size
+        if self.delivery_days is not None:
+            doc["delivery_days"] = self.delivery_days
+        return doc
 
 
 @dataclass(frozen=True)
@@ -149,11 +165,7 @@ class SampleSeed:
                 "notification_prompt": self.notification_prompt,
                 "promo_dialog": self.promo_dialog,
             },
-            "products": [
-                {"id": p.id, "name": p.name, "tagline": p.tagline, "price_cents": p.price_cents,
-                 "image": p.image, "collection": p.collection}
-                for p in self.products
-            ],
+            "products": [p.to_json() for p in self.products],
             "cart": [{"product_id": c.product_id, "quantity": c.quantity} for c in self.cart],
             "orders": [
                 {
@@ -208,7 +220,10 @@ CREATE TABLE products (
     price_cents INTEGER NOT NULL,
     image TEXT NOT NULL DEFAULT '',
     collection TEXT NOT NULL DEFAULT '',
-    position INTEGER NOT NULL
+    position INTEGER NOT NULL,
+    tags TEXT NOT NULL DEFAULT '',
+    serving_size INTEGER,
+    delivery_days INTEGER
 );
 CREATE TABLE cart_items (
     product_id INTEGER PRIMARY KEY REFERENCES products(id),
@@ -282,10 +297,12 @@ def _load_seed_rows(conn: sqlite3.Connection, seed: dict[str, Any], products: li
     prices: dict[int, int] = {}
     names: dict[int, str] = {}
     for pos, p in enumerate(products):
+        tags, serving_size, delivery_days = product_facts(p)
         conn.execute(
-            "INSERT INTO products(id, name, tagline, price_cents, image, collection, position) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO products(id, name, tagline, price_cents, image, collection, position, tags, serving_size, "
+            "delivery_days) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (p["id"], p["name"], p.get("tagline", ""), p["price_cents"], p.get("image", ""),
-             p.get("collection", ""), pos),
+             p.get("collection", ""), pos, tags, serving_size, delivery_days),
         )
         prices[p["id"]], names[p["id"]] = p["price_cents"], p["name"]
     for line in seed.get("cart") or []:
@@ -303,6 +320,56 @@ def _load_seed_rows(conn: sqlite3.Connection, seed: dict[str, Any], products: li
             raise ValueError(f"order {o.get('id')}: items incomplete")
         insert_order(conn, o.get("id"), o["placed_at"], o.get("status", "DELIVERED"),
                      o.get("shipping_cents", shipping), items)
+
+
+TAG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _org_json_string(value: Any) -> str:
+    """What the app's JSONArray.getString returns for an element (measured on
+    emulator-5586): strings as is, true/false and null spelled out, numbers as text."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return str(value)
+
+
+def _org_json_int(value: Any, what: str) -> int:
+    """What the app's JSONObject.getInt accepts (measured on emulator-5586):
+    integers, numbers truncated toward zero, numeric strings ("4", "2.7");
+    null, booleans and other strings are rejected."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{what} is not a number")
+    if isinstance(value, int):
+        return value  # exact; the float path below would round integers above 2**53
+    try:
+        number = float(value)
+        if number != number:  # NaN
+            raise ValueError
+        return int(number)
+    except (ValueError, OverflowError, TypeError):  # "four", inf / huge, lists and objects
+        raise ValueError(f"{what} is not a number") from None
+
+
+def product_facts(p: dict[str, Any]) -> tuple[str, int | None, int | None]:
+    """(tags as stored, serving_size, delivery_days) the way Store.loadSeed
+    reads them: a non-array `tags` means no tags; each tag must be lowercase
+    words joined by "-"; present numbers must be positive. ValueError where the app rejects."""
+    raw = p.get("tags")
+    tags = [_org_json_string(t) for t in raw] if isinstance(raw, list) else []
+    if not all(TAG_RE.fullmatch(t) for t in tags):
+        raise ValueError(f"product {p.get('id')}: tags must be lowercase words joined by '-'")
+    numbers: list[int | None] = []
+    for key in ("serving_size", "delivery_days"):
+        if key not in p:
+            numbers.append(None)
+            continue
+        value = _org_json_int(p[key], f"product {p.get('id')}: {key}")
+        if value <= 0:
+            raise ValueError(f"product {p.get('id')}: {key} must be positive")
+        numbers.append(value)
+    return ",".join(tags), numbers[0], numbers[1]
 
 
 def insert_order(conn: sqlite3.Connection, order_id: int | None, placed_at: int, status: str, shipping: int,

@@ -384,6 +384,7 @@ class Config:
     budget_usd: float = 2.0
     screenshot_max_px: int = 1280
     runs_dir: str = "runs"
+    run_cap_usd: float = 1.50  # per-run model spend cap (the agent stops when reached)
     api_key: str | None = field(default=None, repr=False)
 
     _ENV = {
@@ -393,6 +394,7 @@ class Config:
         "budget_usd": "HARNESS_BUDGET_USD",
         "screenshot_max_px": "HARNESS_SCREENSHOT_MAX_PX",
         "runs_dir": "HARNESS_RUNS_DIR",
+        "run_cap_usd": "HARNESS_RUN_CAP_USD",
         "api_key": "ANTHROPIC_API_KEY",
     }
 
@@ -417,8 +419,9 @@ class Config:
             except ValueError:
                 raise ConfigError(f"{cls._ENV[f.name]} must be {conv.__name__}") from None
         config = cls(**kwargs)
-        for name in ("max_steps", "wall_clock_s", "budget_usd", "screenshot_max_px"):
-            if getattr(config, name) <= 0:
+        for name in ("max_steps", "wall_clock_s", "budget_usd", "screenshot_max_px", "run_cap_usd"):
+            value = getattr(config, name)
+            if not value > 0 or value == float("inf"):  # also rejects NaN
                 raise ConfigError(f"{cls._ENV[name]} must be positive")
         return config
 

@@ -38,6 +38,30 @@
     <string name="detail_placeholder">Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut tempus, sem vitae convallis imperdiet, lectus nunc pharetra diam, ac rhoncus quam eros eu risus. Nulla pulvinar condimentum erat, pulvinar tempus turpis blandit ut. Etiam sed ipsum sed lacus eleifend hendrerit eu quis quam. Etiam ligula eros, finibus vestibulum tortor ac, ultrices accumsan dolor. Vivamus vel nisl a libero lobortis posuere. Aenean facilisis nibh vel ultrices bibendum. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Suspendisse ac est vitae lacus commodo efficitur at ut massa. Etiam vestibulum sit amet sapien sed varius. Aliquam non ipsum imperdiet, pulvinar enim nec, mollis risus. Fusce id tincidunt nisl.</string>
     <string name="ingredients">Ingredients</string>
     <string name="ingredients_list">Vanilla, Almond Flour, Eggs, Butter, Cream, Sugar</string>
+    <string name="detail_dietary">Dietary</string>
+    <string name="detail_servings">Pack size</string>
+    <string name="detail_delivery">Delivery</string>
+    <string name="tag_nut_free">Nut-free</string>
+    <string name="tag_contains_nuts">Contains nuts</string>
+    <string name="tag_vegan">Vegan</string>
+    <string name="tag_gluten_free">Gluten-free</string>
+    <string name="tag_dairy_free">Dairy-free</string>
+    <plurals name="serves">
+        <item quantity="one">Serves %1$d</item>
+        <item quantity="other">Serves %1$d</item>
+    </plurals>
+    <plurals name="serves_b">
+        <item quantity="one">%1$d serving</item>
+        <item quantity="other">%1$d servings</item>
+    </plurals>
+    <plurals name="delivery_days">
+        <item quantity="one">Delivery in %1$d day</item>
+        <item quantity="other">Delivery in %1$d days</item>
+    </plurals>
+    <plurals name="delivery_days_b">
+        <item quantity="one">Arrives in %1$d day</item>
+        <item quantity="other">Arrives in %1$d days</item>
+    </plurals>
     <string name="quantity">Qty</string>
     <string name="add_to_cart">ADD TO CART</string>
 

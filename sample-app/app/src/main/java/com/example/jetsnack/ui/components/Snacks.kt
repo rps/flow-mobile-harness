@@ -83,6 +83,7 @@ import com.example.jetsnack.ui.SnackSharedElementType
 import com.example.jetsnack.ui.snackdetail.nonSpatialExpressiveSpring
 import com.example.jetsnack.ui.snackdetail.snackDetailBoundsTransform
 import com.example.jetsnack.ui.theme.JetsnackTheme
+import com.example.jetsnack.ui.utils.dietaryLabel
 
 private val HighlightCardWidth = 170.dp
 private val HighlightCardPadding = 16.dp
@@ -304,7 +305,7 @@ private fun HighlightSnackItem(
                 )
                 .size(
                     width = HighlightCardWidth,
-                    height = 250.dp,
+                    height = 266.dp,
                 )
                 .border(
                     1.dp,
@@ -433,6 +434,17 @@ private fun HighlightSnackItem(
                         )
                         .wrapContentWidth(),
                 )
+                // Cards are narrow: dietary labels only; lists and the detail screen show the rest.
+                dietaryLabel(snack)?.let { info ->
+                    Text(
+                        text = info,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = JetsnackTheme.colors.textHelp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                }
             }
         }
     }

@@ -213,6 +213,22 @@ def test_per_run_cap_stops_mid_run(config):
     assert Ledger(config.runs_dir + "/ledger.json").total() == pytest.approx(0.6)
 
 
+def test_per_run_cap_follows_config_when_no_settings_are_passed(config):
+    config.run_cap_usd = 0.5  # what HARNESS_RUN_CAP_USD=0.5 sets
+    model = ScriptedModel([tool("back", _usage=(0, 10_000, 0, 0))], repeat_last=True)
+    out = run_agent("Loop", FakeDevice(), config, approve, Recorder(), model_client=model)
+    assert out.termination_reason is TerminationReason.BUDGET
+    assert len(model.requests) == 3 and out.steps == 2 and out.estimated_cost_usd == pytest.approx(0.6)
+
+
+def test_explicit_settings_take_precedence_over_the_config_cap(config):
+    config.run_cap_usd = 0.1
+    model = ScriptedModel([tool("back", _usage=(0, 10_000, 0, 0))], repeat_last=True)
+    out = run_agent("Loop", FakeDevice(), config, approve, Recorder(), model_client=model,
+                    settings=AgentSettings(per_run_cap_usd=0.5))
+    assert out.steps == 2  # the 0.5 cap from settings, not 0.1 from config
+
+
 def test_unpriced_model_is_refused(config):
     config.model = "claude-unknown-9"
     model = ScriptedModel([])

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -179,3 +180,73 @@ def test_provision_twice_with_the_same_apk_is_idempotent(fake_manager):
     assert kinds.index("restore") < kinds.index("install") < kinds.index("save")  # re-provisioned
     assert json.loads(fm.baseline.read_text())["sample_app"] == recorded  # record kept, installed_at unchanged
     assert first["installed_at"] == second["installed_at"] == recorded["installed_at"]
+
+
+def _installs(fm):
+    return [c for c in fm.calls if c[0] == "install"]
+
+
+@pytest.mark.parametrize("old", [{"sha256": "old", "installed_at": "2026-10-03T02:17:02+00:00"}, {"sha256": "old"}])
+def test_upgrade_installs_the_new_apk_over_a_different_record_and_replaces_only_that_entry(fake_manager, old):
+    fm = fake_manager
+    fm.baseline.write_text(json.dumps({"avd": "labs", "host_loopback_blocked": True, "sample_app": old}))
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    info = prov.provision(fm.apk, baseline_json=fm.baseline, upgrade=True)
+    digest = hashlib.sha256(b"fake apk").hexdigest()
+    assert _installs(fm) == [("install", str(fm.apk), digest)]  # one install of the new APK (install -r)
+    kinds = [c[0] for c in fm.calls]
+    assert kinds.index("restore") < kinds.index("install") < kinds.index("save")
+    data = json.loads(fm.baseline.read_text())
+    assert {k: data[k] for k in ("avd", "host_loopback_blocked")} == {"avd": "labs", "host_loopback_blocked": True}
+    entry = data["sample_app"]
+    assert entry["sha256"] == digest == info["sha256"] and entry["replaces_sha256"] == "old"
+    assert before <= datetime.fromisoformat(entry["installed_at"]) <= datetime.now(timezone.utc)
+
+
+def test_upgrade_with_the_same_apk_reinstalls_and_keeps_the_record(fake_manager):
+    fm = fake_manager
+    prov.provision(fm.apk, baseline_json=fm.baseline)
+    recorded = json.loads(fm.baseline.read_text())["sample_app"]
+    fm.calls.clear()
+    prov.provision(fm.apk, baseline_json=fm.baseline, upgrade=True)
+    assert len(_installs(fm)) == 1 and ("save", "baseline") in fm.calls
+    assert json.loads(fm.baseline.read_text())["sample_app"] == recorded  # nothing replaced, no replaces_sha256
+
+
+def test_upgrade_without_a_recorded_entry_adds_one_like_a_first_install(fake_manager):
+    fm = fake_manager
+    prov.provision(fm.apk, baseline_json=fm.baseline, upgrade=True)
+    entry = json.loads(fm.baseline.read_text())["sample_app"]
+    assert entry["sha256"] == hashlib.sha256(b"fake apk").hexdigest() and "replaces_sha256" not in entry
+
+
+def _boom_install(fm):
+    def boom(path, sha=None):
+        fm.calls.append(("install", str(path), sha))
+        raise DeviceError("install failed")
+    return boom
+
+
+@pytest.mark.parametrize("failure", ["provider", "install", "not_listed"])
+def test_failed_upgrade_saves_nothing_and_keeps_the_old_record(fake_manager, monkeypatch, failure):
+    fm = fake_manager
+    fm.baseline.write_text(json.dumps({"sample_app": {"sha256": "old"}}))
+    if failure == "provider":
+        fm.provider_ok = False
+    elif failure == "install":
+        monkeypatch.setattr(manager, "install_apk", _boom_install(fm))
+    else:
+        fm.pkg_listed = False
+    with pytest.raises(DeviceError):
+        prov.provision(fm.apk, baseline_json=fm.baseline, upgrade=True)
+    assert len(_installs(fm)) == 1 and ("save", "baseline") not in fm.calls
+    assert json.loads(fm.baseline.read_text()) == {"sample_app": {"sha256": "old"}}
+
+
+def test_cli_passes_baseline_json_and_upgrade(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(prov, "provision", lambda apk, **kw: seen.update(apk=apk, **kw) or {})
+    prov.main(["--apk", "x.apk", "--baseline-json", str(tmp_path / "b.json"), "--upgrade"])
+    assert (seen["baseline_json"], seen["upgrade"]) == (str(tmp_path / "b.json"), True)
+    prov.main([])
+    assert (seen["baseline_json"], seen["upgrade"]) == (None, False)

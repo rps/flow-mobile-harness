@@ -140,6 +140,7 @@ def order_id_in_text(text: str, order_id: int) -> bool:
 
 
 QTY_KEYS = re.compile(r"qty|quant|count|\bunits?\b|number|pieces|how_many", re.I)
+NAME_KEYS = re.compile(r"(?:item|name|product|title)(?:_?name)?", re.I)
 NOT_QTY_KEYS = re.compile(r"id|price|cents|total|subtotal|amount|cost|shipping", re.I)
 
 
@@ -167,12 +168,20 @@ def summary_text(summary: Any) -> str:
 
 
 def summary_items(summary: Any) -> list[Any]:
-    """The elements that could describe one item each: list elements, and
-    (key, scalar) pairs of dicts (an {"Donut": 2} mapping lists items by key)."""
+    """The elements that could describe one item each: list elements, (key,
+    scalar) pairs of dicts (an {"Donut": 2} mapping lists items by key), and
+    a flat dict (no nested dict or list) with both a name-like key (item,
+    name, product, title) and a quantity-like key, which describes one item
+    with its fields side by side ({"item": "Donut", "quantity": 2, "total":
+    ...}). A name-to-count mapping, or an order text next to an unrelated
+    count, is not one item."""
     items: list[Any] = []
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
+            flat = not any(isinstance(v, (dict, list, tuple)) for v in value.values())
+            if flat and any(_is_qty_key(k) for k in value) and any(NAME_KEYS.fullmatch(str(k)) for k in value):
+                items.append(value)  # its (key, scalar) pairs below stay candidates too; matching is any()
             for k, v in value.items():
                 if isinstance(v, (dict, list, tuple)):
                     walk(v)

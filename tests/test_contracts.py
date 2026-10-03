@@ -160,3 +160,15 @@ def test_screenshot_maps_scaled_to_device_pixels():
     shot = c.Screenshot(b"", width=1080, height=2400, scaled_width=540, scaled_height=1200)
     assert shot.to_device(270, 600) == (540, 1200)
     assert shot.to_device(0, 1200) == (0, 2400)
+
+
+def test_run_cap_env_override_and_default(tmp_path):
+    assert c.Config.from_env(None, environ={}).run_cap_usd == 1.50
+    assert c.Config.from_env(None, environ={"HARNESS_RUN_CAP_USD": "2.50"}).run_cap_usd == 2.50
+    assert c.Config.from_env(None, environ={}).to_dict()["run_cap_usd"] == 1.50  # recorded in the trace
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "two"])
+def test_run_cap_rejects_non_positive_non_finite_and_non_numeric(raw):
+    with pytest.raises(c.ConfigError, match="HARNESS_RUN_CAP_USD"):
+        c.Config.from_env(None, environ={"HARNESS_RUN_CAP_USD": raw})

@@ -25,6 +25,8 @@ BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 DUMP_PATH = "/sdcard/window_dump.xml"
 TEXT_CHUNK = 100
 MAX_LABEL = 120
+# Text of editable fields (a note open in an editor) is shown longer; everything else stays at MAX_LABEL.
+MAX_EDIT_TEXT_LABEL = 600
 # Text of password fields is replaced by this before anything leaves ui_tree().
 REDACTED = "[redacted]"
 
@@ -303,7 +305,7 @@ class AdbDevice:
                 packages.append(pkg)
             parts = [cls or "View"]
             if text:
-                parts.append(f'"{_label(text)}"')
+                parts.append(f'"{_label(text, MAX_EDIT_TEXT_LABEL if cls == "EditText" else MAX_LABEL)}"')
             if desc:
                 parts.append(f'desc="{_label(desc)}"')
             rid = a.get("resource-id", "").split(":id/", 1)[-1]
@@ -408,9 +410,9 @@ class AdbDevice:
         return {"rows": rows[:limit], "total": len(rows)}
 
 
-def _label(s: str) -> str:
+def _label(s: str, limit: int = MAX_LABEL) -> str:
     s = s.replace("\n", "\\n").replace('"', "'")
-    return s if len(s) <= MAX_LABEL else s[: MAX_LABEL - 1] + "…"
+    return s if len(s) <= limit else s[: limit - 1] + "…"
 
 
 def _group_contacts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

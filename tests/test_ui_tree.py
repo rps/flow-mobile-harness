@@ -106,3 +106,37 @@ def test_snackorders_query_is_a_fixed_read_only_entry():
     assert cols == ["_id", "placed_at", "status", "item_count", "subtotal_cents", "shipping_cents", "total_cents"]
     assert where is None and sort is None
     assert "snackorders.orders" in AdbDevice("fake").allowed_queries()
+
+
+def _node(index, cls, text, desc="", password="false", top=0):
+    return (f'<node index="{index}" text="{text}" resource-id="com.example:id/n{index}" class="android.widget.{cls}" '
+            f'package="com.example" content-desc="{desc}" checkable="false" checked="false" clickable="true" '
+            f'enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" '
+            f'password="{password}" selected="false" visible-to-user="true" bounds="[0,{top}][1080,{top + 100}]" />')
+
+
+def _label_of(tree, index):
+    line = next(l for l in tree.splitlines() if f"id=n{index} " in l)
+    return line.split('"')[1]
+
+
+def test_edit_text_shows_up_to_600_characters_and_other_nodes_stay_at_120(monkeypatch):
+    note, long_note, long_view = "n" * 590, "e" * 700, "v" * 300
+    nodes = [_node(0, "EditText", note, desc="d" * 300, top=0), _node(1, "EditText", long_note, top=100),
+             _node(2, "TextView", long_view, top=200)]
+    dump = f"<?xml version='1.0' encoding='UTF-8' ?><hierarchy rotation=\"0\">{''.join(nodes)}</hierarchy>"
+    tree = _wire(monkeypatch, FakeDevice(dump)).ui_tree()
+    assert _label_of(tree, 0) == note  # a long note in an editor arrives whole
+    assert _label_of(tree, 1) == "e" * 599 + "…"
+    assert _label_of(tree, 2) == "v" * 119 + "…"  # non-editable text unchanged
+    line0 = next(l for l in tree.splitlines() if "id=n0 " in l)
+    assert f'desc="{"d" * 119}…"' in line0  # descriptions keep the short cap, editable or not
+
+
+def test_long_password_edit_text_is_still_redacted(monkeypatch):
+    secret = "s3cret-" * 60  # 420 characters, inside the editable-text cap
+    dump = ("<?xml version='1.0' encoding='UTF-8' ?><hierarchy rotation=\"0\">"
+            f"{_node(0, 'EditText', secret, desc=secret, password='true')}</hierarchy>")
+    tree = _wire(monkeypatch, FakeDevice(dump)).ui_tree()
+    assert "s3cret" not in tree
+    assert f'"{REDACTED}" desc="{REDACTED}"' in tree and "password" in tree
