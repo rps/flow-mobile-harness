@@ -20,6 +20,8 @@
         --code: #efefec;
         --warn-bg: #fff4dc;
         --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23676767' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+        --busy-bg: #8a1c1c;
+        --busy-fg: #fff;
       }
       /* Dark tokens apply with the system scheme unless the page is forced
          light, and always when it is forced dark (the Theme control). */
@@ -38,6 +40,8 @@
           --code: #262626;
           --warn-bg: #2d2416;
           --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239b9b98' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+          --busy-bg: #f2b8b5;
+          --busy-fg: #2a0707;
         }
       }
       :root[data-theme="dark"] {
@@ -54,6 +58,8 @@
         --code: #262626;
         --warn-bg: #2d2416;
         --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239b9b98' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+        --busy-bg: #f2b8b5;
+        --busy-fg: #2a0707;
       }
       * {
         box-sizing: border-box;
@@ -148,7 +154,8 @@
       }
       select,
       textarea,
-      input[type="number"] {
+      input[type="number"],
+      input[type="text"] {
         width: 100%;
         font: inherit;
         color: var(--fg);
@@ -361,6 +368,22 @@
         color: var(--fg);
         white-space: nowrap;
       }
+      #busy {
+        background: var(--busy-bg);
+        color: var(--busy-fg);
+        padding: 10px 16px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+        position: sticky;
+        top: 0;
+        z-index: 5;
+      }
+      #busy[hidden] {
+        display: none;
+      }
+      #busy .sub {
+        font-weight: 400;
+      }
     </style>
   </head>
   <body>
@@ -384,6 +407,7 @@
         </select></label
       >
     </header>
+    <div id="busy" role="status" aria-live="polite" hidden></div>
     <main>
       <div class="tab grid" id="tab-run">
         <div>
@@ -428,6 +452,8 @@
               spend)</label
             >
             <p class="note small" id="fake-note" hidden></p>
+            <label for="name">Your name (optional, shown to other testers)</label>
+            <input type="text" id="name" maxlength="40" placeholder="another tester" />
             <div class="row" style="margin-top: 12px">
               <button class="primary" id="start">Start</button>
               <span class="small muted" id="start-msg"></span>
@@ -581,7 +607,8 @@
         tasks = [],
         flows = [],
         current = null,
-        source = null;
+        source = null,
+        devStatus = null;
       // "[Flow X] Name" for a registered task; a retired id stays as it is
       function taskLabel(id, flow) {
         if (!id || id === "freeform") return "Freeform Goal";
@@ -593,6 +620,110 @@
         const f = flows.find((x) => x.flow_type === flow);
         return f ? f.label : flow;
       }
+
+      // --- name (per browser), sent with each job so others see who holds the device
+      try {
+        $("name").value = localStorage.getItem("harness_name") || "";
+      } catch (e) {}
+      $("name").addEventListener("change", () => {
+        try {
+          localStorage.setItem("harness_name", $("name").value.trim());
+        } catch (e) {}
+      });
+
+      // Jobs started in this browser: on load only those are resumed, so a
+      // second tester's page does not adopt someone else's run as its own.
+      function myJobs() {
+        try {
+          return JSON.parse(localStorage.getItem("harness_my_jobs") || "[]");
+        } catch (e) {
+          return [];
+        }
+      }
+      function rememberJob(id) {
+        try {
+          localStorage.setItem(
+            "harness_my_jobs",
+            JSON.stringify(myJobs().concat(id).slice(-20)),
+          );
+        } catch (e) {}
+      }
+
+      // --- device status banner (one emulator, one queue): polled every 3 s
+      const hhmm = (iso) =>
+        iso
+          ? new Date(iso).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "?";
+      function queuePosition(jobId) {
+        if (!devStatus) return null;
+        const i = devStatus.queue.findIndex((q) => q.job_id === jobId);
+        return i < 0 ? null : i + 1;
+      }
+      function showStatus(s) {
+        devStatus = s;
+        const box = $("busy");
+        if (!s.busy) {
+          box.hidden = true;
+          box.replaceChildren();
+        } else {
+          const c = s.current;
+          const mine = c && current && current.job_id === c.job_id;
+          const wait =
+            !s.estimated_wait_s
+              ? ""
+              : ", about " +
+                Math.max(1, Math.round(s.estimated_wait_s / 60)) +
+                " min";
+          let head, sub;
+          if (s.restoring) {
+            head = "IN USE: restoring the device after a cancelled run";
+            sub = "New jobs queue behind it" + wait + ".";
+          } else if (c) {
+            head =
+              (mine ? "IN USE: your job is running " : "IN USE: " +
+                c.requested_by_hint + " is running ") +
+              taskLabel(c.task_id) +
+              " since " +
+              hhmm(c.started_at) +
+              " (" +
+              c.steps_so_far +
+              " step" +
+              (c.steps_so_far === 1 ? "" : "s") +
+              (c.status === "waiting_confirmation" ? ", waiting for a confirmation" : "") +
+              ")";
+            const pos = current ? queuePosition(current.job_id) : null;
+            sub = pos
+              ? "Your job is queued, position " + pos + " of " + s.queued + "."
+              : mine
+              ? s.queued
+                ? s.queued + " job" + (s.queued === 1 ? "" : "s") + " queued behind yours."
+                : ""
+              : "Your job will queue behind it" +
+                (s.queued ? " and " + s.queued + " other" + (s.queued === 1 ? "" : "s") : "") +
+                wait +
+                ".";
+          } else {
+            head = "IN USE: " + s.queued + " job" + (s.queued === 1 ? "" : "s") + " queued";
+            sub = "The device is about to start the next one.";
+          }
+          box.replaceChildren(
+            el("div", { text: head }),
+            sub ? el("div", { class: "sub small", text: sub }) : null,
+          );
+          box.hidden = false;
+        }
+        if (current && current.status === "queued") showJob(current);
+      }
+      async function pollStatus() {
+        try {
+          showStatus(await api("/api/status"));
+        } catch (e) {}
+      }
+      pollStatus();
+      setInterval(pollStatus, 3000);
 
       // --- tabs; the hash (#run, #runs, #score, #flows, #runs/<run_id>) deep-links one
       function selectTab(name) {
@@ -647,6 +778,11 @@
           fake: $("fake").checked,
           repeat: Number($("repeat").value) || 1,
         };
+        const name = $("name").value.trim();
+        if (name) body.name = name;
+        try {
+          localStorage.setItem("harness_name", name);
+        } catch (e) {}
         if (freeform) body.goal = goal;
         else body.task_id = $("task").value;
         $("start-msg").textContent = "";
@@ -656,7 +792,9 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
+          rememberJob(job.job_id);
           watch(job);
+          pollStatus();
         } catch (e) {
           $("start-msg").textContent = e.message;
         }
@@ -668,6 +806,21 @@
         box.replaceChildren();
         box.append(
           el("div", { text: j.job_id + " · " + j.status }),
+          j.status === "queued"
+            ? el("div", {
+                class: "warn",
+                text: (() => {
+                  // once a status poll arrived it is the only source (the POST's position goes stale)
+                  const pos = devStatus ? queuePosition(j.job_id) : j.queue_position;
+                  return pos
+                    ? "Queued, position " +
+                        pos +
+                        ": it starts when the job" +
+                        (pos === 1 ? " ahead finishes." : "s ahead finish.")
+                    : "Queued: it starts when the device is free.";
+                })(),
+              })
+            : null,
           el("div", {
             text:
               taskLabel(j.task_id) +
@@ -733,7 +886,8 @@
         showJob(job);
         $("steps").replaceChildren();
         resetShot();
-        $("run-title").textContent = "Queued…";
+        $("run-title").textContent =
+          job.status === "queued" ? "Queued: waiting for the device…" : "Starting…";
         $("run-meta").textContent = "";
         source = new EventSource("/api/jobs/" + job.job_id + "/events");
         source.addEventListener("run_started", (e) => {
@@ -1390,7 +1544,10 @@
         if (tab) selectTab(tab);
         if (tab === "runs" && runId) showDetail(runId);
         const jobs = await api("/api/jobs").catch(() => []);
-        const live = jobs.find((j) => !TERMINAL.includes(j.status));
+        const mine = myJobs();
+        const live = jobs.find(
+          (j) => !TERMINAL.includes(j.status) && mine.includes(j.job_id),
+        );
         if (live) watch(live);
       })();
     </script>

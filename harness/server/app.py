@@ -29,6 +29,11 @@ holds it, because that run restores first anyway). A cancel that lands after
 the agent's turn changes nothing about that run (it stands, scored as usual);
 no further repeat starts and the job ends done with `cancel_requested` set so
 the page can say so.
+
+Status: GET /api/status tells a second tester the device is in use (one
+emulator, one serial queue): the running job, who asked for it (the free-text
+`name` a job may carry, kept in run meta["requested_by"]), how many jobs wait,
+and a wait estimate from the median wall time of recent non-fake runs.
 """
 
 from __future__ import annotations
@@ -39,10 +44,14 @@ import hmac
 import itertools
 import json
 import logging
+import math
 import queue
 import re
 import secrets
+import statistics
 import threading
+import unicodedata
+from datetime import datetime, timezone
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -88,6 +97,9 @@ TERMINAL = ("done", "error", "cancelled")
 RESTORE_LOCK_TIMEOUT_S = 30.0
 CANCELLED_BY = "web_ui"  # meta["cancelled_by"] when the server's own fallback stopped a run
 CANCEL_DECIDED = ("runner", "fallback")
+DEFAULT_REQUESTER = "another tester"  # status hint for a job sent without a name
+WAIT_HISTORY_RUNS = 20  # recent non-fake runs whose median wall time sizes the wait estimate
+MAX_WALL_S = 86400.0  # a recorded wall time above a day is treated as bad data, not history
 
 
 # --- Jobs ------------------------------------------------------------------------
@@ -99,11 +111,15 @@ class StartJob(BaseModel):
     policy: Literal["ui", "approve", "reject"] = "ui"
     fake: bool = False
     repeat: int = Field(1, ge=1, le=20)
+    name: str | None = Field(None, max_length=40)  # free-text "who is this", shown in /api/status
 
     @model_validator(mode="after")
     def _one_target(self) -> StartJob:
         if self.goal is not None:
             self.goal = self.goal.strip() or None
+        if self.name is not None:  # control and format characters dropped, whitespace collapsed
+            kept = "".join(ch for ch in self.name if unicodedata.category(ch) not in ("Cc", "Cf") or ch.isspace())
+            self.name = " ".join(kept.split()) or None
         if (self.task_id is None) == (self.goal is None):
             raise ValueError("give exactly one of task_id or goal")
         return self
@@ -141,6 +157,8 @@ class Job:
     # job never ran).
     cancel: str | None = None
     restore: str | None = None
+    started_at: str | None = None  # ISO UTC, when the worker took the job
+    steps: int = 0  # steps written in the current run
 
     def check_cancelled(self) -> None:
         """Fallback stop: raise once the server's fallback is armed (the hook
@@ -161,7 +179,8 @@ class Job:
             "job_id": self.id, "status": self.status, "run_ids": list(self.run_ids), "error": self.error,
             "task_id": self.req.task_id, "goal": self.req.goal, "policy": self.req.policy,
             "fake": self.req.fake, "repeat": self.req.repeat, "restore": self.restore,
-            "cancel_requested": self.cancel is not None,
+            "cancel_requested": self.cancel is not None, "name": self.req.name,
+            "started_at": self.started_at,
         }
         if self.pending is not None:
             out["pending"] = self.pending.to_dict()
@@ -228,6 +247,7 @@ class _ObservedWriter(RunWriter):
     def write_step(self, step: StepRecord, screenshot_png: bytes | None, ui_tree: str | None) -> StepRecord:
         stored = super().write_step(step, screenshot_png, ui_tree)
         self.usage = self.usage + step.usage
+        self.job.steps = stored.index + 1
         self.job.emit("step", {
             "run_id": self.run.run_id,
             "index": stored.index,
@@ -253,6 +273,7 @@ class _ObservedStore(TraceStore):
     def start_run(self, run: RunRecord) -> RunWriter:
         writer = super().start_run(run)
         self.job.run = run
+        self.job.steps = 0
         self.job.run_ids.append(run.run_id)
         self.job.emit("run_started", {"run_id": run.run_id, "task_id": run.task_id,
                                       "flow_type": run.flow_type.value, "goal": run.goal})
@@ -285,6 +306,8 @@ class JobManager:
         self.closing = threading.Event()
         self._real_env = None
         self._counter = itertools.count(1)
+        self.restoring = False  # the worker is restoring baseline after a cancelled run
+        self._wall_cache: tuple[tuple[tuple[str, int], ...], float | None] = ((), None)
         self.worker = threading.Thread(target=self._work, name="harness-ui-worker", daemon=True)
 
     # --- lifecycle
@@ -309,6 +332,82 @@ class JobManager:
         self.jobs[job.id] = job
         self.queue.put(job)
         return job
+
+    # --- status
+
+    def waiting(self) -> list[Job]:
+        """Queued jobs in the worker's order (submit order), cancelled ones left out."""
+        return [j for j in list(self.jobs.values()) if j.status == "queued" and j.cancel is None]
+
+    def median_wall_s(self) -> float | None:
+        """Median meta["wall_s"] of the last WAIT_HISTORY_RUNS non-fake runs
+        (run ids sort by start time); None without history. Cached on the
+        newest run ids and their run.json mtimes (wall_s is written when a run
+        ends) so a 3 s poll does not reparse every run.json."""
+        root = Path(self.config.runs_dir)
+        names = TraceStore(root).list_runs()[-4 * WAIT_HISTORY_RUNS:]
+        key: list[tuple[str, int]] = []
+        for name in names:
+            try:
+                key.append((name, (root / name / "run.json").stat().st_mtime_ns))
+            except OSError:
+                continue
+        cached_key, cached = self._wall_cache
+        if tuple(key) == cached_key:
+            return cached
+        walls: list[float] = []
+        for name, _ in reversed(key):
+            try:
+                meta = json.loads((root / name / "run.json").read_text()).get("meta") or {}
+                wall = meta.get("wall_s")
+                if not meta.get("fake") and isinstance(wall, (int, float)) and not isinstance(wall, bool) \
+                        and math.isfinite(wall) and 0 < wall <= MAX_WALL_S:
+                    walls.append(float(wall))
+            except (OSError, ValueError, AttributeError):
+                continue
+            if len(walls) >= WAIT_HISTORY_RUNS:
+                break
+        median = statistics.median(walls) if walls else None
+        self._wall_cache = (tuple(key), median)
+        return median
+
+    def status(self) -> dict[str, Any]:
+        active = next((j for j in list(self.jobs.values())
+                       if j.status not in TERMINAL and j.status != "queued"), None)
+        waiting = self.waiting()
+        current = None
+        # Runs that hold the device ahead of a new job; fake runs take seconds and
+        # do not use the device, so they are not priced at the real-run median.
+        runs_ahead = sum(j.req.repeat for j in waiting if not j.req.fake)
+        if active is not None:
+            run = active.run
+            current = {
+                "job_id": active.id,
+                "task_id": active.req.task_id or "freeform",
+                "started_at": active.started_at,
+                "steps_so_far": active.steps if run is not None else 0,
+                "requested_by_hint": active.req.name or DEFAULT_REQUESTER,
+                "status": active.status,
+                "run_index": len(active.run_ids),
+                "repeat": active.req.repeat,
+            }
+            if active.req.fake:
+                pass
+            elif active.cancel is not None:  # no further repeat starts: the current run or its restore
+                runs_ahead += 1
+            else:
+                runs_ahead += max(1, active.req.repeat - len(active.run_ids) + (1 if run is not None else 0))
+        median = self.median_wall_s()
+        return {
+            "busy": active is not None or bool(waiting) or self.restoring,
+            "current": current,
+            "queued": len(waiting),
+            "queue": [{"job_id": j.id, "task_id": j.req.task_id or "freeform",
+                       "requested_by_hint": j.req.name or DEFAULT_REQUESTER} for j in waiting],
+            "restoring": self.restoring,
+            "median_run_s": median,
+            "estimated_wait_s": None if median is None else round(median * runs_ahead),
+        }
 
     # --- confirmation
 
@@ -398,6 +497,7 @@ class JobManager:
                 if job.cancel is not None:  # cancelled while queued; cancel() reports it
                     continue
                 job.status = "running"
+                job.started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             try:
                 interrupted = self._run_job(job)
             except Exception as e:  # a job error must not kill the worker
@@ -430,6 +530,7 @@ class JobManager:
                 emulator=env.emulator, store=store, model_client=client, settings=env.settings,
                 allow_unblocked=self.allow_unblocked, baseline_json=self.baseline_json,
                 meta={"fake": env.fake, "source": "web_ui", "job_id": job.id,
+                      **({"requested_by": req.name} if req.name else {}),
                       **({"fake_confirm_step": FAKE_CONFIRM_NOTE} if script is not None else {})},
             )
             job.emit("run_finished", _run_summary(run, Path(env.config.runs_dir)))
@@ -439,7 +540,11 @@ class JobManager:
                 job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "runner"})
                 return True
             if run.meta.get("cancelled_by") == CANCELLED_BY:  # the server's fallback stopped it
-                job.restore = self._restore(env)
+                self.restoring = True
+                try:
+                    job.restore = self._restore(env)
+                finally:
+                    self.restoring = False
                 job.emit("restore", {"run_id": run.run_id, "restore": job.restore, "by": "server"})
                 return True
             with job.cond:
@@ -587,7 +692,16 @@ def create_app(
         if req.goal is not None and not jobs.freeform_enabled():
             raise HTTPException(409, "freeform run refused: host loopback is not blocked "
                                      "(start the server with --allow-unblocked to allow it)")
-        return jobs.submit(req).summary()
+        job = jobs.submit(req)
+        out = job.summary()
+        waiting = [j.id for j in jobs.waiting()]
+        out["queue_position"] = waiting.index(job.id) + 1 if job.id in waiting else None
+        return out
+
+    @app.get("/api/status")
+    def device_status() -> dict[str, Any]:
+        """Is the single device in use, by whom, and how long a new job waits."""
+        return jobs.status()
 
     @app.get("/api/jobs")
     def list_jobs() -> list[dict[str, Any]]:

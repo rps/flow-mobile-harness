@@ -46,7 +46,7 @@ per-user identity in the UI. Rejected alternatives: an IAP HTTPS load balancer (
 auto-stop disabled, since a reviewer cannot start it.
 
 The emulator is also single-tenant: one AVD, one baseline snapshot, one run at a time. A second
-tester's run waits in the queue.
+tester's run waits in the queue; the web UI shows an IN USE banner (who, which task, steps, estimated wait) and the queue position.
 
 ## API key
 
